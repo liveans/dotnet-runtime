@@ -298,5 +298,21 @@ namespace System.Net.Sockets
 #endif
             return this;
         }
+
+        internal void TransferHandleState(Socket target)
+        {
+            _handle.TransferTrackedState(target._handle);
+
+            if (_handle.IsTrackedOption(TrackedSocketOptions.ReceiveBufferSize)) target.ReceiveBufferSize = ReceiveBufferSize;
+            if (_handle.IsTrackedOption(TrackedSocketOptions.SendBufferSize)) target.SendBufferSize = SendBufferSize;
+            if (_handle.IsTrackedOption(TrackedSocketOptions.ReceiveTimeout)) target.ReceiveTimeout = ReceiveTimeout;
+            if (_handle.IsTrackedOption(TrackedSocketOptions.SendTimeout)) target.SendTimeout = SendTimeout;
+            if (_handle.IsTrackedOption(TrackedSocketOptions.LingerState)) target.LingerState = LingerState!;
+            if (_handle.IsTrackedOption(TrackedSocketOptions.NoDelay)) target.NoDelay = NoDelay;
+            if (_handle.IsTrackedOption(TrackedSocketOptions.Ttl)) target.Ttl = Ttl;
+            if (_handle.IsTrackedOption(TrackedSocketOptions.DontFragment)) target.DontFragment = DontFragment;
+            if (_handle.IsTrackedOption(TrackedSocketOptions.EnableBroadcast)) target.EnableBroadcast = EnableBroadcast;
+            if (_handle.IsTrackedOption(TrackedSocketOptions.DualMode)) target.DualMode = DualMode;
+        }
     }
 }

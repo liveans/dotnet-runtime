@@ -345,6 +345,8 @@ namespace System.Net.Sockets
             }
             else
             {
+                // Copy current state to accepted socket to make sure handle is in same state.
+                _acceptSocket.TransferHandleState(acceptedSocket);
                 // Copy state from the accepted socket into the caller-supplied socket and then dispose of the original.
                 _acceptSocket.DisposeHandle();
                 _acceptSocket.CopyStateFromSource(acceptedSocket);
