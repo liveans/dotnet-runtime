@@ -25,8 +25,6 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "System.Net.Requests", "..\S
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "System.Net.Security", "..\System.Net.Security\ref\System.Net.Security.csproj", "{8B797B66-AFDF-4F42-BFF9-1DA1E8E28AD3}"
 EndProject
-Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "System.Net.ServicePoint", "..\System.Net.ServicePoint\ref\System.Net.ServicePoint.csproj", "{2E61BE5B-473C-4708-B0D9-E7175B4E4D15}"
-EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "System.Net.WebClient", "ref\System.Net.WebClient.csproj", "{F1689AFC-F672-4407-B5C9-3515C301CF31}"
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "System.Net.WebClient", "src\System.Net.WebClient.csproj", "{18F1E6CD-3568-4042-9EC3-6430FD60EC3A}"

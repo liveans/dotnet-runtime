@@ -31,7 +31,7 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "System.Net.Primitives", "..
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "System.Net.Security", "..\System.Net.Security\ref\System.Net.Security.csproj", "{63AD4246-28A6-4FFC-9864-F49BE7EA06A0}"
 EndProject
-Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "System.Net.ServicePoint", "..\System.Net.ServicePoint\ref\System.Net.ServicePoint.csproj", "{0FC3D1DF-6D65-4319-967D-CD3870500060}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "System.Net.Requests", "..\System.Net.Requests\ref\System.Net.Requests.csproj", "{0FC3D1DF-6D65-4319-967D-CD3870500060}"
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "System.ObjectModel", "..\System.ObjectModel\ref\System.ObjectModel.csproj", "{15058CBC-DF6D-4B1A-A9B1-C4B6ADF2B8A5}"
 EndProject
