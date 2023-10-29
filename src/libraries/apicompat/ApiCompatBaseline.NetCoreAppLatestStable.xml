@@ -2,6 +2,12 @@
 <!-- https://learn.microsoft.com/en-us/dotnet/fundamentals/package-validation/diagnostic-ids -->
 <Suppressions xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
   <Suppression>
+    <DiagnosticId>CP0003</DiagnosticId>
+    <Target>System.Net.ServicePoint, Version=9.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a</Target>
+    <Left>net8.0/System.Net.ServicePoint.dll</Left>
+    <Right>net9.0/System.Net.ServicePoint.dll</Right>
+  </Suppression>
+  <Suppression>
     <DiagnosticId>CP0014</DiagnosticId>
     <Target>M:System.GC.RefreshMemoryLimit:[T:System.Runtime.Versioning.RequiresPreviewFeaturesAttribute]</Target>
     <Left>net8.0/mscorlib.dll</Left>
