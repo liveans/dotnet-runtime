@@ -3221,11 +3221,6 @@ public:
     bool fgSafeBasicBlockCreation;
 #endif
 
-    BasicBlock* bbNewBasicBlock();
-    BasicBlock* bbNewBasicBlock(BBjumpKinds jumpKind, BasicBlock* jumpDest = nullptr);
-    BasicBlock* bbNewBasicBlock(BBswtDesc* jumpSwt);
-    BasicBlock* bbNewBasicBlock(BBjumpKinds jumpKind, unsigned jumpOffs);
-
     /*
     XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
     XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
@@ -5717,6 +5712,10 @@ public:
                                 fgWalkPostFn* visitor,
                                 void*         pCallBackData = nullptr,
                                 bool          computeStack  = false);
+
+#ifdef DEBUG
+    void fgInvalidateBBLookup();
+#endif // DEBUG
 
     /**************************************************************************
      *                          PROTECTED
@@ -10353,7 +10352,7 @@ public:
 
     unsigned compArgSize; // total size of arguments in bytes (including register args (lvIsRegArg))
 
-#ifdef TARGET_ARM
+#if defined(TARGET_ARM) || defined(TARGET_RISCV64)
     bool compHasSplitParam;
 #endif
 
