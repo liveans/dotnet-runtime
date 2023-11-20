@@ -1,6 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
@@ -11,6 +12,7 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using System.Runtime.Serialization;
 using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
@@ -994,17 +996,17 @@ namespace System.Net
                 {
                     _responseCallback(_responseOperation.Task);
                 }
-
-                // Cancel the underlying send operation.
-                Debug.Assert(_sendRequestCts != null);
-                _sendRequestCts.Cancel();
             }
-            else if (_requestStreamOperation != null)
+            if (_requestStreamOperation != null)
             {
                 if (_requestStreamOperation.TrySetCanceled() && _requestStreamCallback != null)
                 {
                     _requestStreamCallback(_requestStreamOperation.Task);
                 }
+
+                // Cancel the underlying send operation.
+                Debug.Assert(_sendRequestCts != null);
+                _sendRequestCts.Cancel();
             }
         }
 
@@ -1032,8 +1034,7 @@ namespace System.Net
         {
             try
             {
-                _sendRequestCts = new CancellationTokenSource();
-                return SendRequest(async: false).GetAwaiter().GetResult();
+                return HandleResponse(false).GetAwaiter().GetResult();
             }
             catch (Exception ex)
             {
@@ -1043,10 +1044,10 @@ namespace System.Net
 
         public override Stream GetRequestStream()
         {
-            return InternalGetRequestStream().Result;
+            return InternalGetRequestStream(false).Result;
         }
 
-        private Task<Stream> InternalGetRequestStream()
+        private Task<Stream> InternalGetRequestStream(bool async)
         {
             CheckAbort();
 
@@ -1065,7 +1066,14 @@ namespace System.Net
                 throw new InvalidOperationException(SR.net_reqsubmitted);
             }
 
-            _requestStream = new RequestStream();
+            // Let's create stream buffer for transferring data from RequestStream to the StreamContent.
+            StrongBox<int> box = new StrongBox<int>();
+            StreamBuffer streamBuffer = new StreamBuffer();
+            //s_cachedHttpClient = GetCachedOrCreateHttpClient(async, out bool disposeRequired);
+            _sendRequestTask = SendRequest(async, new StreamContent(new HttpClientContentStream(streamBuffer, box)));
+
+            // If any parameter changed let's change the RequestStream.
+            _requestStream ??= new RequestStream(box, streamBuffer, AllowWriteStreamBuffering);
 
             return Task.FromResult((Stream)_requestStream);
         }
@@ -1092,7 +1100,7 @@ namespace System.Net
             }
 
             _requestStreamCallback = callback;
-            _requestStreamOperation = InternalGetRequestStream().ToApm(callback, state);
+            _requestStreamOperation = InternalGetRequestStream(true).ToApm(callback, state);
 
             return _requestStreamOperation.Task;
         }
@@ -1124,7 +1132,7 @@ namespace System.Net
             return stream;
         }
 
-        private async Task<WebResponse> SendRequest(bool async)
+        private Task<HttpResponseMessage> SendRequest(bool async, HttpContent? content = null)
         {
             if (RequestSubmitted)
             {
@@ -1137,14 +1145,14 @@ namespace System.Net
             HttpClient? client = null;
             try
             {
+                _sendRequestCts = new CancellationTokenSource();
                 client = GetCachedOrCreateHttpClient(async, out disposeRequired);
-                if (_requestStream != null)
+                if (content is not null)
                 {
-                    ArraySegment<byte> bytes = _requestStream.GetBuffer();
-                    request.Content = new ByteArrayContent(bytes.Array!, bytes.Offset, bytes.Count);
+                    request.Content = content;
                 }
 
-                if (_hostUri != null)
+                if (_hostUri is not null)
                 {
                     request.Headers.Host = Host;
                 }
@@ -1183,34 +1191,43 @@ namespace System.Net
                 }
 
                 request.Version = ProtocolVersion;
-
+                HttpCompletionOption completionOption = _allowReadStreamBuffering ?
+                                HttpCompletionOption.ResponseContentRead : HttpCompletionOption.ResponseHeadersRead;
                 _sendRequestTask = async ?
-                    client.SendAsync(request, _allowReadStreamBuffering ? HttpCompletionOption.ResponseContentRead : HttpCompletionOption.ResponseHeadersRead, _sendRequestCts!.Token) :
-                    Task.FromResult(client.Send(request, _allowReadStreamBuffering ? HttpCompletionOption.ResponseContentRead : HttpCompletionOption.ResponseHeadersRead, _sendRequestCts!.Token));
+                    client.SendAsync(request, completionOption, _sendRequestCts!.Token) :
+                    Task.Run(() => client.Send(request, completionOption, _sendRequestCts!.Token));
 
-                HttpResponseMessage responseMessage = await _sendRequestTask.ConfigureAwait(false);
-
-                HttpWebResponse response = new HttpWebResponse(responseMessage, _requestUri, _cookieContainer);
-
-                int maxSuccessStatusCode = AllowAutoRedirect ? 299 : 399;
-                if ((int)response.StatusCode > maxSuccessStatusCode || (int)response.StatusCode < 200)
-                {
-                    throw new WebException(
-                        SR.Format(SR.net_servererror, (int)response.StatusCode, response.StatusDescription),
-                        null,
-                        WebExceptionStatus.ProtocolError,
-                        response);
-                }
-
-                return response;
+                return _sendRequestTask!;
             }
             finally
             {
                 if (disposeRequired)
                 {
                     client?.Dispose();
+                    _requestStream = null;
                 }
             }
+        }
+
+        private async Task<WebResponse> HandleResponse(bool async)
+        {
+            _sendRequestTask ??= SendRequest(async);
+
+            HttpResponseMessage responseMessage = await _sendRequestTask!.ConfigureAwait(false);
+
+            HttpWebResponse response = new HttpWebResponse(responseMessage, _requestUri, _cookieContainer);
+
+            int maxSuccessStatusCode = AllowAutoRedirect ? 299 : 399;
+            if ((int)response.StatusCode > maxSuccessStatusCode || (int)response.StatusCode < 200)
+            {
+                throw new WebException(
+                    SR.Format(SR.net_servererror, (int)response.StatusCode, response.StatusDescription),
+                    null,
+                    WebExceptionStatus.ProtocolError,
+                    response);
+            }
+
+            return response;
         }
 
         private void AddCacheControlHeaders(HttpRequestMessage request)
@@ -1334,9 +1351,8 @@ namespace System.Net
                 throw new InvalidOperationException(SR.net_repcall);
             }
 
-            _sendRequestCts = new CancellationTokenSource();
             _responseCallback = callback;
-            _responseOperation = SendRequest(async: true).ToApm(callback, state);
+            _responseOperation = HandleResponse(true).ToApm(callback, state);
 
             return _responseOperation.Task;
         }
