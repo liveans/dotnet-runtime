@@ -15,6 +15,7 @@ using System.Diagnostics.Tracing;
 using System.Net.Sockets;
 using System.Reflection;
 using Microsoft.Quic;
+using TestUtilities;
 
 namespace System.Net.Quic.Tests
 {
@@ -43,10 +44,22 @@ namespace System.Net.Quic.Tests
         public ITestOutputHelper _output;
         public const int PassingTestTimeoutMilliseconds = 4 * 60 * 1000;
         public static TimeSpan PassingTestTimeout => TimeSpan.FromMilliseconds(PassingTestTimeoutMilliseconds);
+        public static TestEventListener? _testEventListener = null;
 
         public QuicTestBase(ITestOutputHelper output)
         {
             _output = output;
+            if (_testEventListener is null)
+            {
+                _testEventListener = new TestEventListener(s =>
+                {
+                    if (s.Contains("CONNECTED") || s.Contains("New outbound connection") ||
+                        s.Contains("HandshakeTimeout Tracing") || s.Contains("New inbound connection"))
+                    {
+                        _output.WriteLine(s);
+                    }
+                }, TestEventListener.NetworkingEvents);
+            }
         }
 
         public void Dispose()

@@ -241,7 +241,10 @@ public sealed partial class QuicListener : IAsyncDisposable
             // Update handshake timeout based on the returned value.
             handshakeTimeout = options.HandshakeTimeout;
             linkedCts.CancelAfter(handshakeTimeout);
-
+            if (NetEventSource.Log.IsEnabled())
+            {
+                NetEventSource.Info(this, $"HandshakeTimeout Tracing - Before Finish Handshake Async");
+            }
             await connection.FinishHandshakeAsync(options, clientHello.ServerName, cancellationToken).ConfigureAwait(false);
             if (!_acceptQueue.Writer.TryWrite(connection))
             {

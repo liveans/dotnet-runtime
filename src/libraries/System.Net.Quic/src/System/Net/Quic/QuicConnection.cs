@@ -353,6 +353,11 @@ public sealed partial class QuicConnection : IAsyncDisposable
 
     private async ValueTask FinishConnectAsync(QuicClientConnectionOptions options, CancellationToken cancellationToken = default)
     {
+        if (NetEventSource.Log.IsEnabled())
+        {
+            NetEventSource.Info(this, $"HandshakeTimeout Tracing - FinishConnectAsync");
+        }
+
         if (_connectedTcs.TryInitialize(out ValueTask valueTask, this, cancellationToken))
         {
             _canAccept = options.MaxInboundBidirectionalStreams > 0 || options.MaxInboundUnidirectionalStreams > 0;
@@ -369,11 +374,20 @@ public sealed partial class QuicConnection : IAsyncDisposable
             {
                 Debug.Assert(host is not null);
 
+                if (NetEventSource.Log.IsEnabled())
+                {
+                    NetEventSource.Info(this, $"HandshakeTimeout Tracing - Before Dns Resolve");
+                }
+
                 // Given just a ServerName to connect to, MsQuic would also use the first address after the resolution
                 // (https://github.com/microsoft/msquic/issues/1181) and it would not return a well-known error code
                 // for resolution failures we could rely on. By doing the resolution in managed code, we can guarantee
                 // that a SocketException will surface to the user if the name resolution fails.
                 IPAddress[] addresses = await Dns.GetHostAddressesAsync(host, cancellationToken).ConfigureAwait(false);
+                if (NetEventSource.Log.IsEnabled())
+                {
+                    NetEventSource.Info(this, $"HandshakeTimeout Tracing - After Dns Resolve");
+                }
                 cancellationToken.ThrowIfCancellationRequested();
                 if (addresses.Length == 0)
                 {
@@ -391,6 +405,11 @@ public sealed partial class QuicConnection : IAsyncDisposable
                 MsQuicHelpers.SetMsQuicParameter(_handle, QUIC_PARAM_CONN_LOCAL_ADDRESS, localQuicAddress);
             }
 
+            if (NetEventSource.Log.IsEnabled())
+            {
+                NetEventSource.Info(this, $"HandshakeTimeout Tracing - After Setting Addresses");
+            }
+
             _sslConnectionOptions = new SslConnectionOptions(
                 this,
                 isClient: true,
@@ -400,6 +419,10 @@ public sealed partial class QuicConnection : IAsyncDisposable
                 options.ClientAuthenticationOptions.RemoteCertificateValidationCallback,
                 options.ClientAuthenticationOptions.CertificateChainPolicy?.Clone());
             _configuration = MsQuicConfiguration.Create(options);
+            if (NetEventSource.Log.IsEnabled())
+            {
+                NetEventSource.Info(this, $"HandshakeTimeout Tracing - MsQuicConfiguration.Create()");
+            }
 
             // RFC 6066 forbids IP literals.
             // IDN mapping is handled by MsQuic.
@@ -423,6 +446,11 @@ public sealed partial class QuicConnection : IAsyncDisposable
             {
                 Marshal.FreeCoTaskMem(targetHostPtr);
             }
+
+            if (NetEventSource.Log.IsEnabled())
+            {
+                NetEventSource.Info(this, $"HandshakeTimeout Tracing - AfterConnectionStart");
+            }
         }
 
         await valueTask.ConfigureAwait(false);
@@ -430,8 +458,17 @@ public sealed partial class QuicConnection : IAsyncDisposable
 
     internal ValueTask FinishHandshakeAsync(QuicServerConnectionOptions options, string targetHost, CancellationToken cancellationToken = default)
     {
+        if (NetEventSource.Log.IsEnabled())
+        {
+            NetEventSource.Info(this, $"HandshakeTimeout Tracing - Start of FinishHandshakeAsync");
+        }
+
         if (_connectedTcs.TryInitialize(out ValueTask valueTask, this, cancellationToken))
         {
+            if (NetEventSource.Log.IsEnabled())
+            {
+                NetEventSource.Info(this, $"HandshakeTimeout Tracing - After connectedTcs Init");
+            }
             _canAccept = options.MaxInboundBidirectionalStreams > 0 || options.MaxInboundUnidirectionalStreams > 0;
             _defaultStreamErrorCode = options.DefaultStreamErrorCode;
             _defaultCloseErrorCode = options.DefaultCloseErrorCode;
@@ -441,6 +478,11 @@ public sealed partial class QuicConnection : IAsyncDisposable
             if (TargetHostNameHelper.IsValidAddress(targetHost))
             {
                 targetHost = string.Empty;
+            }
+
+            if (NetEventSource.Log.IsEnabled())
+            {
+                NetEventSource.Info(this, $"HandshakeTimeout Tracing - After setting options");
             }
 
             _sslConnectionOptions = new SslConnectionOptions(
@@ -453,12 +495,22 @@ public sealed partial class QuicConnection : IAsyncDisposable
                 options.ServerAuthenticationOptions.CertificateChainPolicy?.Clone());
             _configuration = MsQuicConfiguration.Create(options, targetHost);
 
+            if (NetEventSource.Log.IsEnabled())
+            {
+                NetEventSource.Info(this, $"HandshakeTimeout Tracing - Create Msquic Configuration in FinishHandshakeAsync");
+            }
+
             unsafe
             {
                 ThrowHelper.ThrowIfMsQuicError(MsQuicApi.Api.ConnectionSetConfiguration(
                     _handle,
                     _configuration),
                     "ConnectionSetConfiguration failed");
+            }
+
+            if (NetEventSource.Log.IsEnabled())
+            {
+                NetEventSource.Info(this, $"HandshakeTimeout Tracing - After Connection Set Configuration");
             }
         }
 
