@@ -84,6 +84,7 @@
       <_CommonLinkerArgs Include="-lswiftFoundation" />
       <_CommonLinkerArgs Include="-framework Foundation" />
       <_CommonLinkerArgs Include="-framework Security" />
+      <_CommonLinkerArgs Include="-framework Network" />
       <_CommonLinkerArgs Include="-framework CryptoKit" />
       <_CommonLinkerArgs Include="-framework UIKit" />
     </ItemGroup>
@@ -240,6 +241,7 @@
       <DirectPInvokes Include="libSystem.Native" />
       <DirectPInvokes Include="libSystem.IO.Compression.Native" />
       <DirectPInvokes Include="libSystem.Net.Security.Native" />
+      <DirectPInvokes Include="libSystem.Net.Native.Apple" />
       <DirectPInvokes Include="libSystem.Security.Cryptography.Native.Apple" />
       <DirectPInvokes Include="libbrotlienc;libbrotlidec" />
     </ItemGroup>

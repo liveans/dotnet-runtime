@@ -173,5 +173,6 @@ if (CLR_CMAKE_TARGET_UNIX OR CLR_CMAKE_TARGET_BROWSER OR CLR_CMAKE_TARGET_WASI)
 
     if (CLR_CMAKE_TARGET_APPLE)
         add_subdirectory(System.Security.Cryptography.Native.Apple)
+        add_subdirectory(System.Net.Native.Apple)
     endif ()
 endif ()

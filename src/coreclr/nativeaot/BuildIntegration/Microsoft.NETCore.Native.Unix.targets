@@ -139,6 +139,7 @@ The .NET Foundation licenses this file to you under the MIT license.
       <NetCoreAppNativeLibrary Include="System.Native" />
       <NetCoreAppNativeLibrary Include="System.Globalization.Native" Condition="'$(StaticICULinking)' != 'true' and '$(InvariantGlobalization)' != 'true'" />
       <NetCoreAppNativeLibrary Include="System.IO.Compression.Native" />
+      <NetCoreAppNativeLibrary Include="System.Net.Native.Apple" Condition="'$(_IsApplePlatform)' == 'true'" />
       <NetCoreAppNativeLibrary Include="System.Net.Security.Native" Condition="!$(_targetOS.StartsWith('tvos')) and '$(_linuxLibcFlavor)' != 'bionic'" />
       <NetCoreAppNativeLibrary Include="System.Security.Cryptography.Native.Apple" Condition="'$(_IsApplePlatform)' == 'true'" />
       <!-- Not compliant for iOS-like platforms -->
@@ -201,6 +202,7 @@ The .NET Foundation licenses this file to you under the MIT license.
       <NativeFramework Include="CoreFoundation" />
       <NativeFramework Include="CryptoKit" />
       <NativeFramework Include="Foundation" />
+      <NativeFramework Include="Network" />
       <NativeFramework Include="Security" />
       <!-- The library builds don't reference the GSS API on tvOS builds. -->
       <NativeFramework Condition="!$(_targetOS.StartsWith('tvos'))" Include="GSS" />

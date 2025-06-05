@@ -221,11 +221,14 @@ LIST(APPEND NATIVE_LIBS
 if(CLR_CMAKE_TARGET_APPLE)
     LIST(APPEND NATIVE_LIBS
         System.Security.Cryptography.Native.Apple-Static
+        System.Net.Native.Apple-Static
     )
 
     # Additional requirements for System.Security.Cryptography.Native.Apple
     include(${CLR_SRC_NATIVE_DIR}/libs/System.Security.Cryptography.Native.Apple/extra_libs.cmake)
+    include(${CLR_SRC_NATIVE_DIR}/libs/System.Net.Native.Apple/extra_libs.cmake)
     append_extra_cryptography_apple_libs(NATIVE_LIBS)
+    append_extra_network_apple_libs(NATIVE_LIBS)
 endif()
 
 #

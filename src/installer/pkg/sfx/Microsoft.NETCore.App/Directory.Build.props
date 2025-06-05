@@ -86,6 +86,8 @@
     <PlatformManifestFileEntry Include="libSystem.Net.Http.Native.a" IsNative="true" />
     <PlatformManifestFileEntry Include="libSystem.Net.Http.Native.dylib" IsNative="true" />
     <PlatformManifestFileEntry Include="libSystem.Net.Http.Native.so" IsNative="true" />
+    <PlatformManifestFileEntry Include="libSystem.Net.Native.Apple.a" IsNative="true" />
+    <PlatformManifestFileEntry Include="libSystem.Net.Native.Apple.dylib" IsNative="true" />
     <PlatformManifestFileEntry Include="libSystem.Net.Security.Native.a" IsNative="true" />
     <PlatformManifestFileEntry Include="libSystem.Net.Security.Native.dylib" IsNative="true" />
     <PlatformManifestFileEntry Include="libSystem.Net.Security.Native.so" IsNative="true" />

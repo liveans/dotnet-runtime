@@ -53,6 +53,7 @@
 
   <Target Name="GetSharedFrameworkRuntimeFiles">
     <ItemGroup>
+      <ManualRuntimePackNativeFile Include="System.Net.Native.Apple.dylib" />
       <ManualRuntimePackNativeFile Include="System.Security.Cryptography.Native.Android.so" />
       <ManualRuntimePackNativeFile Include="System.Security.Cryptography.Native.Android.dex" />
       <ManualRuntimePackNativeFile Include="System.Security.Cryptography.Native.Android.jar" />

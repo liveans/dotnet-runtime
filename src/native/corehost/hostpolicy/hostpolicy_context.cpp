@@ -52,6 +52,7 @@ namespace
     extern "C" const void* SystemResolveDllImport(const char* name);
     extern "C" const void* CryptoResolveDllImport(const char* name);
     extern "C" const void* CryptoAppleResolveDllImport(const char* name);
+    extern "C" const void* NetAppleResolveDllImport(const char* name);
 
     // pinvoke_override:
     // Check if given function belongs to one of statically linked libraries and return a pointer if found.
@@ -99,6 +100,11 @@ namespace
         if (strcmp(library_name, LIB_NAME("System.Security.Cryptography.Native.Apple")) == 0)
         {
             return CryptoAppleResolveDllImport(entry_point_name);
+        }
+
+        if (strcmp(library_name, LIB_NAME("System.Net.Native.Apple")) == 0)
+        {
+            return NetAppleResolveDllImport(entry_point_name);
         }
 #endif
 
