@@ -30,5 +30,8 @@ namespace System.Net.Security
         {
             return true;
         }
+
+        internal abstract void Write(ReadOnlySpan<byte> buffer);
+        internal abstract void ReadPendingWrites(ref ProtocolToken token);
     }
 }

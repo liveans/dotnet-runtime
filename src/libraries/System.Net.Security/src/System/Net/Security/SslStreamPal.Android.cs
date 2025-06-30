@@ -12,7 +12,7 @@ using PAL_SSLStreamStatus = Interop.AndroidCrypto.PAL_SSLStreamStatus;
 
 namespace System.Net.Security
 {
-    internal static class SslStreamPal
+    internal static partial class SslStreamPal
     {
         public static Exception GetException(SecurityStatusPal status)
         {

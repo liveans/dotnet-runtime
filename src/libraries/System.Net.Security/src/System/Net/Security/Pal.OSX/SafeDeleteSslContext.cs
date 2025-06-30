@@ -295,7 +295,7 @@ namespace System.Net
             }
         }
 
-        internal void Write(ReadOnlySpan<byte> buf)
+        internal override void Write(ReadOnlySpan<byte> buf)
         {
             lock (_sslContext)
             {
@@ -307,7 +307,7 @@ namespace System.Net
 
         internal int BytesReadyForConnection => _outputBuffer.ActiveLength;
 
-        internal void ReadPendingWrites(ref ProtocolToken token)
+        internal override void ReadPendingWrites(ref ProtocolToken token)
         {
             lock (_sslContext)
             {
