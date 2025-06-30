@@ -50,7 +50,7 @@ namespace System.Net.Security
 
 
         private SafeFreeCredentials? _credentialsHandle;
-        private SafeDeleteSslContext? _securityContext;
+        private SafeDeleteContext? _securityContext;
 
         private SslConnectionInfo _connectionInfo;
         private X509Certificate? _selectedClientCertificate;
@@ -1340,7 +1340,7 @@ namespace System.Net.Security
         {
             get
             {
-                return ((Status.ErrorCode != SecurityStatusPalErrorCode.OK) && (Status.ErrorCode != SecurityStatusPalErrorCode.ContinueNeeded));
+                return ((Status.ErrorCode != SecurityStatusPalErrorCode.OK) && (Status.ErrorCode != SecurityStatusPalErrorCode.ContinueNeeded) && (Status.ErrorCode != SecurityStatusPalErrorCode.ContinuePending));
             }
         }
 

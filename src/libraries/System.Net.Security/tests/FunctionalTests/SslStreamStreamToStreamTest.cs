@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.DotNet.XUnitExtensions;
 using Xunit;
+using TestUtilities;
 
 namespace System.Net.Security.Tests
 {
@@ -137,25 +138,26 @@ namespace System.Net.Security.Tests
         [SkipOnPlatform(TestPlatforms.iOS | TestPlatforms.tvOS, "X509 certificate store is not supported on iOS or tvOS.")]
         public async Task Read_CorrectlyUnlocksAfterFailure()
         {
+            using var listener = new TestEventListener((message) => Console.WriteLine(message), TestEventListener.NetworkingEvents);
             (Stream stream1, Stream stream2) = TestHelper.GetConnectedStreams();
             var clientStream = new ThrowingDelegatingStream(stream1);
             using (var clientSslStream = new SslStream(clientStream, false, AllowAnyServerCertificate))
             using (var serverSslStream = new SslStream(stream2))
             {
-                await DoHandshake(clientSslStream, serverSslStream);
+                await DoHandshake(clientSslStream, serverSslStream).WaitAsync(TestConfiguration.PassingTestTimeout);
 
                 // Throw an exception from the wrapped stream's read operation
                 clientStream.ExceptionToThrow = new FormatException();
-                IOException thrown = await Assert.ThrowsAsync<IOException>(() => ReadAsync(clientSslStream, new byte[1], 0, 1));
+                IOException thrown = await Assert.ThrowsAsync<IOException>(() => ReadAsync(clientSslStream, new byte[1], 0, 1).WaitAsync(TestConfiguration.PassingTestTimeout));
                 Assert.Same(clientStream.ExceptionToThrow, thrown.InnerException);
                 clientStream.ExceptionToThrow = null;
 
                 // Validate that the SslStream continues to be usable
                 for (byte b = 42; b < 52; b++) // arbitrary test values
                 {
-                    await WriteAsync(serverSslStream, new byte[1] { b }, 0, 1);
+                    await WriteAsync(serverSslStream, new byte[1] { b }, 0, 1).WaitAsync(TestConfiguration.PassingTestTimeout);
                     byte[] buffer = new byte[1];
-                    Assert.Equal(1, await ReadAsync(clientSslStream, buffer, 0, 1));
+                    Assert.Equal(1, await ReadAsync(clientSslStream, buffer, 0, 1).WaitAsync(TestConfiguration.PassingTestTimeout));
                     Assert.Equal(b, buffer[0]);
                 }
             }

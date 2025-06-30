@@ -14,7 +14,7 @@ using Microsoft.Win32.SafeHandles;
 
 namespace System.Net.Security
 {
-    internal static class SslStreamPal
+    internal static partial class SslStreamPal
     {
         private static readonly byte[] s_http1 = Interop.Sec_Application_Protocols.ToByteArray(new List<SslApplicationProtocol> { SslApplicationProtocol.Http11 });
         private static readonly byte[] s_http2 = Interop.Sec_Application_Protocols.ToByteArray(new List<SslApplicationProtocol> { SslApplicationProtocol.Http2 });
