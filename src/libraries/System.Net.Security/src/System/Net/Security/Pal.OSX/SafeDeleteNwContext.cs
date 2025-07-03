@@ -64,6 +64,9 @@ namespace System.Net.Security
         // TaskSourceCompletion objects for decrypt operations
         internal TaskCompletionSource<SecurityStatusPalErrorCode>? DecryptTask { get; private set; }
 
+        // TaskCompletionSource for handshake completion
+        private TaskCompletionSource<SecurityStatusPalErrorCode>? _handshakeCompletionSource;
+
         // Read/Write Status
         private volatile int _readStatus;
         private volatile int _writeStatus;
@@ -142,7 +145,7 @@ namespace System.Net.Security
                 {
                     // Call Init with null callbacks to check if Network Framework is available
                     if (NetEventSource.Log.IsEnabled()) NetEventSource.Info(null, "Checking Network Framework availability...");
-                    return !Interop.NetworkFramework.Tls.Init(&StatusUpdateCallback, &WriteOutboundWireData, &WriteOutboundWireData);
+                    return !Interop.NetworkFramework.Tls.Init(&StatusUpdateCallback, &WriteOutboundWireData);
                 }
             }
             catch
@@ -291,6 +294,15 @@ namespace System.Net.Security
             // Signal that data is available
             _writeWaiter.Set();
             if (NetEventSource.Log.IsEnabled()) NetEventSource.Info(this, "Signaled _writeWaiter", "WriteOutboundWireData");
+
+            // If we're in handshake state and have data to send, complete the TCS with ContinueNeeded
+            // This allows the handshake to resume and provide the outbound data to the upper layer
+            if (_handshakeState == HandshakeState.InProgress && _handshakeCompletionSource != null && data.Length > 0)
+            {
+                if (NetEventSource.Log.IsEnabled()) NetEventSource.Info(this, "Completing handshake TCS with ContinueNeeded for handshake data", "WriteOutboundWireData");
+                _handshakeCompletionSource.TrySetResult(SecurityStatusPalErrorCode.ContinueNeeded);
+                _handshakeCompletionSource = null;
+            }
         }
 
 
@@ -305,7 +317,6 @@ namespace System.Net.Security
                 fixed (byte* ptr = &MemoryMarshal.GetReference(buf.Span))
                 {
                     Interop.NetworkFramework.Tls.ProcessInputData(_connectionHandle, _framerHandle, ptr, buf.Length, GCHandle.ToIntPtr(handle), &CompletionCallback);
-
                 }
 
                 return tcs.Task;
@@ -447,14 +458,17 @@ namespace System.Net.Security
             switch (_handshakeState)
             {
                 case HandshakeState.NotStarted:
-                    return StartHandshake();
+                    return await StartHandshakeAsync().ConfigureAwait(false);
 
                 case HandshakeState.InProgress:
                     // return new SecurityStatusPal(SecurityStatusPalErrorCode.ContinueNeeded);
                     return ContinueHandshake();
 
                 case HandshakeState.WaitingForPeer:
-                // return await ProcessPeerDataAsync().ConfigureAwait(false);
+                    // Start continuation of handshake for next round trip
+                    _pendingHandshakeTask = ContinueHandshakeAsync();
+                    _handshakeState = HandshakeState.InProgress;
+                    return new SecurityStatusPal(SecurityStatusPalErrorCode.ContinueNeeded);
 
                 case HandshakeState.Completed:
                     if (NetEventSource.Log.IsEnabled()) NetEventSource.Info(this, "Handshake already completed", "PerformHandshake");
@@ -469,7 +483,7 @@ namespace System.Net.Security
             }
         }
 
-        private SecurityStatusPal StartHandshake()
+        private async Task<SecurityStatusPal> StartHandshakeAsync()
         {
             if (NetEventSource.Log.IsEnabled()) NetEventSource.Info(this, "Starting TLS handshake", "StartHandshake");
 
@@ -478,12 +492,28 @@ namespace System.Net.Security
 
             try
             {
-                // Start async handshake but don't wait
-                _pendingHandshakeTask = StartHandshakeAsync();
+                // Start async handshake and await initial ClientHello production
+                _pendingHandshakeTask = StartHandshakeInternalAsync();
                 _handshakeState = HandshakeState.InProgress;
 
-                if (NetEventSource.Log.IsEnabled()) NetEventSource.Info(this, "Handshake started async", "StartHandshake");
-                return new SecurityStatusPal(SecurityStatusPalErrorCode.ContinueNeeded);
+                var result = await _pendingHandshakeTask.ConfigureAwait(false);
+
+                if (NetEventSource.Log.IsEnabled()) NetEventSource.Info(this, $"Initial handshake step completed with result: {result}", "StartHandshake");
+
+                if (result == SecurityStatusPalErrorCode.ContinueNeeded)
+                {
+                    return new SecurityStatusPal(SecurityStatusPalErrorCode.ContinueNeeded);
+                }
+                else if (result == SecurityStatusPalErrorCode.OK)
+                {
+                    _handshakeState = HandshakeState.Completed;
+                    return new SecurityStatusPal(SecurityStatusPalErrorCode.OK);
+                }
+                else
+                {
+                    _handshakeState = HandshakeState.Failed;
+                    return new SecurityStatusPal(result);
+                }
             }
             catch (Exception ex)
             {
@@ -537,22 +567,51 @@ namespace System.Net.Security
             return new SecurityStatusPal(SecurityStatusPalErrorCode.ContinueNeeded);
         }
 
-        private async Task<SecurityStatusPalErrorCode> StartHandshakeAsync()
+        private async Task<SecurityStatusPalErrorCode> StartHandshakeInternalAsync()
         {
-            if (NetEventSource.Log.IsEnabled()) NetEventSource.Info(this, "Starting async handshake operation", "StartHandshakeAsync");
+            if (NetEventSource.Log.IsEnabled()) NetEventSource.Info(this, "Starting async handshake operation", "StartHandshakeInternalAsync");
 
             try
             {
+                // Create TCS for handshake completion
+                _handshakeCompletionSource = new TaskCompletionSource<SecurityStatusPalErrorCode>(TaskCreationOptions.RunContinuationsAsynchronously);
+
                 Interop.NetworkFramework.Tls.StartTlsHandshake(_connectionHandle, GCHandle.ToIntPtr(_thisHandle));
 
-                // Wait a short time for initial handshake progress
-                await Task.Delay(1).ConfigureAwait(false);
+                // Await for the data to become available from the Network Framework layer
+                var result = await _handshakeCompletionSource.Task.ConfigureAwait(false);
 
-                return SecurityStatusPalErrorCode.ContinueNeeded;
+                if (NetEventSource.Log.IsEnabled()) NetEventSource.Info(this, $"Handshake completed with result: {result}", "StartHandshakeInternalAsync");
+
+                return result;
             }
             catch (Exception ex)
             {
-                if (NetEventSource.Log.IsEnabled()) NetEventSource.Error(this, $"Async handshake failed: {ex}", "StartHandshakeAsync");
+                if (NetEventSource.Log.IsEnabled()) NetEventSource.Error(this, $"Async handshake failed: {ex}", "StartHandshakeInternalAsync");
+                throw;
+            }
+        }
+
+        // Method to continue handshake for subsequent round trips
+        internal async Task<SecurityStatusPalErrorCode> ContinueHandshakeAsync()
+        {
+            if (NetEventSource.Log.IsEnabled()) NetEventSource.Info(this, "Continuing async handshake operation", "ContinueHandshakeAsync");
+
+            try
+            {
+                // Create new TCS for this handshake round
+                _handshakeCompletionSource = new TaskCompletionSource<SecurityStatusPalErrorCode>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+                // Await for the next handshake step to complete
+                var result = await _handshakeCompletionSource.Task.ConfigureAwait(false);
+
+                if (NetEventSource.Log.IsEnabled()) NetEventSource.Info(this, $"Handshake step completed with result: {result}", "ContinueHandshakeAsync");
+
+                return result;
+            }
+            catch (Exception ex)
+            {
+                if (NetEventSource.Log.IsEnabled()) NetEventSource.Error(this, $"Async handshake continuation failed: {ex}", "ContinueHandshakeAsync");
                 throw;
             }
         }
@@ -656,6 +715,10 @@ namespace System.Net.Security
             if (NetEventSource.Log.IsEnabled()) NetEventSource.Info(this, "TLS handshake completed successfully", "HandshakeFinished");
             _handshakeState = HandshakeState.Completed;
             _pendingHandshakeTask = null;
+
+            // Complete the handshake TCS if it exists
+            _handshakeCompletionSource?.TrySetResult(SecurityStatusPalErrorCode.OK);
+            _handshakeCompletionSource = null;
         }
 
         private void HandshakeFailed(int errorCode)
@@ -666,6 +729,10 @@ namespace System.Net.Security
             _handshakeState = HandshakeState.Failed;
             _pendingHandshakeTask = null;
             _readStatus = errorCode;
+
+            // Fail the handshake TCS if it exists
+            _handshakeCompletionSource?.TrySetResult(SecurityStatusPalErrorCode.InternalError);
+            _handshakeCompletionSource = null;
         }
 
         private void ConnectionReadFinished(ReadOnlySpan<byte> data)
@@ -676,7 +743,7 @@ namespace System.Net.Security
             {
                 if (data.Length > 0)
                 {
-                    WriteInboundWireDataAsync(data.ToArray()).AsTask().GetAwaiter().GetResult();
+                    WriteInboundWireDataAsync(data.ToArray()).GetAwaiter().GetResult();
                 }
                 else if (_readStatus == (int)NwOSStatus.NoErr)
                 {
@@ -712,6 +779,10 @@ namespace System.Net.Security
             _readStatus = (int)NwOSStatus.SecUserCanceled;
             _writeWaiter.Set();
             _readWaiter.Set();
+
+            // Cancel the handshake TCS if it exists
+            _handshakeCompletionSource?.TrySetException(ex);
+            _handshakeCompletionSource = null;
         }
 
         private static void HandleDebugLog(int logType, int data)
