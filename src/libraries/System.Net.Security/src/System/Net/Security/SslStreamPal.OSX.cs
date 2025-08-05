@@ -444,9 +444,9 @@ namespace System.Net.Security
             SslAuthenticationOptions sslAuthenticationOptions)
         {
             return
-                sslAuthenticationOptions.IsClient &&
                 SafeDeleteNwContext.IsNetworkFrameworkAvailable &&
                 (sslAuthenticationOptions.EnabledSslProtocols == SslProtocols.None ||
+                sslAuthenticationOptions.EnabledSslProtocols == SslProtocols.Tls12 ||
                    sslAuthenticationOptions.EnabledSslProtocols == SslProtocols.Tls13 ||
                     (sslAuthenticationOptions.EnabledSslProtocols == (SslProtocols.Tls12 | SslProtocols.Tls13)));
         }

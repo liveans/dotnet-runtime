@@ -645,8 +645,7 @@ namespace System
             }
             else if (IsOSX || IsMacCatalyst || IsiOS || IstvOS)
             {
-                // [ActiveIssue("https://github.com/dotnet/runtime/issues/1979")]
-                return false;
+                return IsNetworkFrameworkEnabled();
             }
             else if (IsAndroid)
             {

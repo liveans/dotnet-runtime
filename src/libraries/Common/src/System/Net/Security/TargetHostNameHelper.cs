@@ -36,5 +36,27 @@ namespace System.Net.Security
 
             return targetHost;
         }
+
+        internal static string DenormalizeHostName(string? targetHost)
+        {
+            if (string.IsNullOrEmpty(targetHost))
+            {
+                return string.Empty;
+            }
+
+            // RFC 6066 section 3 says to exclude trailing dot from fully qualified DNS hostname
+            targetHost = targetHost.TrimEnd('.');
+
+            try
+            {
+                return s_idnMapping.GetUnicode(targetHost);
+            }
+            catch (ArgumentException) when (IsSafeDnsString(targetHost))
+            {
+                // If punycode conversion fails but appears to be valid DNS name, return as-is
+            }
+
+            return targetHost;
+        }
     }
 }

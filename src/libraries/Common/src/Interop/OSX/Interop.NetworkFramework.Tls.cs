@@ -24,11 +24,11 @@ internal static partial class Interop
             internal static unsafe partial bool Init(
                 delegate* unmanaged<IntPtr, StatusUpdates, IntPtr, IntPtr, NetworkFrameworkError*, void> statusCallback,
                 delegate* unmanaged<IntPtr, byte*, ulong, void> writeCallback,
-                delegate* unmanaged<IntPtr, IntPtr, IntPtr> challengeCallback);
+                delegate* unmanaged<IntPtr, IntPtr, IntPtr, IntPtr> challengeCallback);
 
             // Create a new connection context
             [LibraryImport(Interop.Libraries.AppleCryptoNative, EntryPoint = "AppleCryptoNative_NwConnectionCreate", StringMarshalling = StringMarshalling.Utf8)]
-            internal static unsafe partial SafeNwHandle NwConnectionCreate([MarshalAs(UnmanagedType.I4)] bool isServer, IntPtr context, string targetName, byte* alpnBuffer, int alpnLength, SslProtocols minTlsProtocol, SslProtocols maxTlsProtocol, uint* cipherSuites, int cipherSuitesLength);
+            internal static unsafe partial SafeNwHandle NwConnectionCreate([MarshalAs(UnmanagedType.I4)] bool isServer, IntPtr context, string targetName, byte* alpnBuffer, int alpnLength, SslProtocols minTlsProtocol, SslProtocols maxTlsProtocol, uint* cipherSuites, int cipherSuitesLength, [MarshalAs(UnmanagedType.I4)] bool clientCertificateRequired);
 
             // Start the TLS handshake, notifications are received via the status callback (potentially from a different thread).
             [LibraryImport(Interop.Libraries.AppleCryptoNative, EntryPoint = "AppleCryptoNative_NwConnectionStart")]

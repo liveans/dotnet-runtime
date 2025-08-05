@@ -156,11 +156,120 @@ static CFStringRef ExtractNetworkFrameworkError(nw_error_t error, PAL_NetworkFra
     return descriptionToRelease;
 }
 
-PALEXPORT nw_connection_t AppleCryptoNative_NwConnectionCreate(int32_t isServer, void* context, char* targetName, const uint8_t * alpnBuffer, int alpnLength, PAL_SslProtocol minTlsProtocol, PAL_SslProtocol maxTlsProtocol, uint32_t* cipherSuites, int cipherSuitesLength)
+static nw_connection_t CreateServerSideConnection(nw_parameters_t parameters, void* context)
 {
-    if (isServer != 0)  // the current implementation only supports client
-        return NULL;
+    // Server-side implementation: create a listener, wait for connection, return it
+    __block nw_connection_t serverConnection = NULL;
+    __block dispatch_semaphore_t connectionSemaphore = dispatch_semaphore_create(0);
 
+    // Create listener on random port
+    nw_listener_t listener = nw_listener_create(parameters);
+    if (listener == NULL)
+    {
+        LOG_INFO(context, "Failed to create listener");
+        nw_release(parameters);
+        dispatch_release(connectionSemaphore);
+        return NULL;
+    }
+
+    // Set up new connection handler to capture incoming connection
+    nw_listener_set_new_connection_handler(listener, ^(nw_connection_t connection) {
+        LOG_INFO(context, "New connection received on listener");
+        serverConnection = nw_retain(connection);
+        dispatch_semaphore_signal(connectionSemaphore);
+    });
+
+    // Start listener
+    nw_listener_set_queue(listener, _tlsQueue);
+    // Wait for listener to be ready
+    dispatch_semaphore_t listenerReadySemaphore = dispatch_semaphore_create(0);
+    nw_listener_set_state_changed_handler(listener, ^(nw_listener_state_t listenerState, nw_error_t error) {
+        (void)error;
+        if (listenerState == nw_listener_state_ready)
+        {
+            LOG_INFO(context, "Listener is ready");
+            dispatch_semaphore_signal(listenerReadySemaphore);
+        }
+        else if (listenerState == nw_listener_state_failed)
+        {
+            LOG_ERROR(context, "Listener failed to start");
+            dispatch_semaphore_signal(listenerReadySemaphore);
+        }
+    });
+
+    nw_listener_start(listener);
+
+    // Wait for listener to be ready (timeout after 5 seconds)
+    if (dispatch_semaphore_wait(listenerReadySemaphore, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0)
+    {
+        LOG_INFO(context, "Timeout waiting for listener to be ready");
+        nw_listener_cancel(listener);
+        nw_release(listener);
+        nw_release(parameters);
+        dispatch_release(connectionSemaphore);
+        dispatch_release(listenerReadySemaphore);
+        return NULL;
+    }
+    dispatch_release(listenerReadySemaphore);
+
+    // Get the actual port the listener is using
+    uint16_t listenerPort = nw_listener_get_port(listener);
+    LOG_INFO(context, "Listener bound to port %d", listenerPort);
+    if (listenerPort == 0)
+    {
+        LOG_ERROR(context, "Failed to get listener port");
+        nw_listener_cancel(listener);
+        nw_release(listener);
+        nw_release(parameters);
+        dispatch_release(connectionSemaphore);
+        return NULL;
+    }
+
+    // Create dummy client connection to trigger the listener
+    char portStr[16];
+    snprintf(portStr, sizeof(portStr), "%d", listenerPort);
+    nw_endpoint_t clientEndpoint = nw_endpoint_create_host("127.0.0.1", portStr);
+    nw_parameters_t clientParams = nw_parameters_create_secure_udp(NW_PARAMETERS_DISABLE_PROTOCOL, NW_PARAMETERS_DEFAULT_CONFIGURATION);
+    nw_connection_t dummyClient = nw_connection_create(clientEndpoint, clientParams);
+    nw_connection_set_queue(dummyClient, _tlsQueue);
+    nw_connection_start(dummyClient);
+    // Send a 0-byte packet to trigger the connection
+    nw_connection_send(dummyClient, NULL, NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT, true, ^(nw_error_t error) {
+        if (error != NULL) {
+            LOG_INFO(context, "Failed to send dummy packet");
+        }
+    });
+
+    // Wait for server connection (timeout after 5 seconds)
+    if (dispatch_semaphore_wait(connectionSemaphore, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0)
+    {
+        LOG_ERROR(context, "Timeout waiting for server connection");
+        nw_connection_cancel(dummyClient);
+        nw_release(dummyClient);
+        nw_listener_cancel(listener);
+        nw_release(listener);
+        nw_release(clientEndpoint);
+        nw_release(clientParams);
+        nw_release(parameters);
+        dispatch_release(connectionSemaphore);
+        return NULL;
+    }
+    // Clean up
+    nw_connection_cancel(dummyClient);
+    nw_release(dummyClient);
+    nw_listener_cancel(listener);
+    nw_release(listener);
+    nw_release(clientEndpoint);
+    nw_release(clientParams);
+    nw_release(parameters);
+    dispatch_release(connectionSemaphore);
+
+    LOG_INFO(context, "Server connection created successfully");
+    return serverConnection;
+}
+
+PALEXPORT nw_connection_t AppleCryptoNative_NwConnectionCreate(int32_t isServer, void* context, char* targetName, const uint8_t * alpnBuffer, int alpnLength, PAL_SslProtocol minTlsProtocol, PAL_SslProtocol maxTlsProtocol, uint32_t* cipherSuites, int cipherSuitesLength, int32_t clientCertificateRequired)
+{
     nw_parameters_t parameters = nw_parameters_create_secure_udp(NW_PARAMETERS_DISABLE_PROTOCOL, NW_PARAMETERS_DEFAULT_CONFIGURATION);
 
 #pragma clang diagnostic push
@@ -211,13 +320,20 @@ PALEXPORT nw_connection_t AppleCryptoNative_NwConnectionCreate(int32_t isServer,
         }
     }
 
+    // Configure client certificate requirement for server connections
+    if (isServer && clientCertificateRequired)
+    {
+        LOG_INFO(context, "Configuring server to require client certificates");
+        sec_protocol_options_set_peer_authentication_required(sec_options, true);
+    }
+
     // Set up challenge block to detect when server requests client certificate
     sec_protocol_options_set_challenge_block(sec_options, ^(sec_protocol_metadata_t metadata, sec_protocol_challenge_complete_t complete)
     {
         // Extract acceptable issuers from metadata
         CFMutableArrayRef acceptableIssuers = NULL;
         
-        if (metadata != NULL)
+        if (isServer == 0 && metadata != NULL)  // Client side certificate request
         {
             // Create array to hold distinguished names
             acceptableIssuers = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
@@ -247,11 +363,21 @@ PALEXPORT nw_connection_t AppleCryptoNative_NwConnectionCreate(int32_t isServer,
             });
         }
         
-        // Call the managed callback to get the client identity
-        void* identity = _challengeFunc(context, acceptableIssuers);
+        // Extract SNI hostname from metadata (server-side)
+        const char* sniHostname = NULL;
+        if (isServer && metadata != NULL)
+        {
+            sniHostname = sec_protocol_metadata_get_server_name(metadata);
+        }
+        
+        // Call the managed callback to get the appropriate identity
+        void* identity = _challengeFunc(context, acceptableIssuers, sniHostname);
         
         // Clean up
-        CFRelease(acceptableIssuers);
+        if (acceptableIssuers != NULL)
+        {
+            CFRelease(acceptableIssuers);
+        }
         
         if (identity != NULL)
         {
@@ -260,13 +386,19 @@ PALEXPORT nw_connection_t AppleCryptoNative_NwConnectionCreate(int32_t isServer,
             sec_identity_t sec_identity = sec_identity_create(secIdentityRef);
             if (sec_identity != NULL)
             {
+                LOG_INFO(context, "Setting %s identity from challenge callback", isServer ? "server" : "client");
                 complete(sec_identity);
                 sec_release(sec_identity);
             }
-
+            else
+            {
+                LOG_ERROR(context, "Failed to create sec_identity from challenge callback");
+                complete(NULL);
+            }
             return;
         }
         
+        LOG_INFO(context, "No identity provided from challenge callback");
         complete(NULL);
     }, _tlsQueue);
 
@@ -296,6 +428,9 @@ PALEXPORT nw_connection_t AppleCryptoNative_NwConnectionCreate(int32_t isServer,
     nw_release(framer_options);
     nw_release(protocol_stack);
     nw_release(tls_options);
+
+    if (isServer != 0)  // the current implementation only supports client
+        return CreateServerSideConnection(parameters, context);
 
     nw_connection_t connection = nw_connection_create(_endpoint, parameters);
 
@@ -592,7 +727,7 @@ PALEXPORT int32_t AppleCryptoNative_Init(StatusUpdateCallback statusFunc, WriteC
         _framerDefinition = nw_framer_create_definition("com.dotnet.networkframework.tlsframer",
             NW_FRAMER_CREATE_FLAGS_DEFAULT, framer_start);
         _tlsDefinition = nw_protocol_copy_tls_definition();
-        _tlsQueue = dispatch_queue_create("com.dotnet.networkframework.tlsqueue", NULL);
+        _tlsQueue = dispatch_queue_create("com.dotnet.networkframework.tlsqueue", DISPATCH_QUEUE_CONCURRENT);
         _inputQueue = _tlsQueue;
 
         // The endpoint values (127.0.0.1:42) are arbitrary - they just need to be

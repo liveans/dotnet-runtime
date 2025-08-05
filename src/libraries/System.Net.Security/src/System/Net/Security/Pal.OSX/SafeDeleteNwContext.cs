@@ -65,7 +65,9 @@ namespace System.Net.Security
         internal IntPtr StateHandle => _thisHandle.IsAllocated ? GCHandle.ToIntPtr(_thisHandle) : IntPtr.Zero;
 
         private TaskCompletionSource<Exception?> _handshakeCompletionSource = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        private TaskCompletionSource _framerAvailableTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         private Task? _transportReadTask;
+        private Task? _handshakeTask; // Separate task for handshake phase using managed ReceiveHandshakeFrameAsync
         private ResettableValueTaskSource _transportReadTcs = new ResettableValueTaskSource()
         {
             CancellationAction = target =>
@@ -81,6 +83,10 @@ namespace System.Net.Security
         private Task? _pendingAppReceiveBufferFillTask;
         private readonly TaskCompletionSource _connectionClosedTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         private CancellationTokenSource _shutdownCts = new CancellationTokenSource();
+
+        private bool _handshakeCompleted;
+        private ArrayBuffer _handshakeBuffer = new(2048); // Buffer for handshake data parsing
+        private TlsFrameHelper.TlsFrameInfo _lastFrame;
 
         private bool _disposed;
         private int _challengeCallbackCompleted;  // 0 = not called, 1 = called
@@ -103,6 +109,7 @@ namespace System.Net.Security
         {
             _sslStream = stream;
             ValidateSslAuthenticationOptions(SslAuthenticationOptions);
+            ValidateServerCertificateRequirements(SslAuthenticationOptions);
             _thisHandle = GCHandle.Alloc(this, GCHandleType.Normal);
             ConnectionHandle = CreateConnectionHandle(SslAuthenticationOptions, _thisHandle);
 
@@ -126,7 +133,20 @@ namespace System.Net.Security
                 ((TaskCompletionSource<Exception?>)state!).TrySetCanceled(token);
             }, _handshakeCompletionSource);
 
-            _transportReadTask = Task.Run(async () =>
+            if (SslAuthenticationOptions.IsServer)
+            {
+                await _framerAvailableTcs.Task.ConfigureAwait(false);
+            }
+
+            // Create a handshake task that uses managed ReceiveHandshakeFrameAsync for ClientHello parsing
+            _handshakeTask = CreateHandshakeTask(cancellationToken);
+
+            return await _handshakeCompletionSource.Task.ConfigureAwait(false);
+        }
+
+        private Task CreateHandshakeTask(CancellationToken cancellationToken)
+        {
+            return Task.Run(async () =>
             {
                 try
                 {
@@ -135,25 +155,52 @@ namespace System.Net.Security
                     {
                         Memory<byte> readBuffer = new Memory<byte>(buffer);
 
-                        while (!_shutdownCts.IsCancellationRequested)
+                        while (!_handshakeCompleted && !_shutdownCts.IsCancellationRequested)
                         {
-                            // Read data from the transport stream
+                            // Read data from the transport stream during handshake
                             int bytesRead = await TransportStream.ReadAsync(readBuffer, _shutdownCts.Token).ConfigureAwait(false);
 
                             if (bytesRead > 0)
                             {
-                                // Process the read data
-                                await WriteInboundWireDataAsync(readBuffer.Slice(0, bytesRead)).ConfigureAwait(false);
+                                // During handshake, attempt to parse ClientHello for server-side connections
+                                if (SslAuthenticationOptions.IsServer && SslAuthenticationOptions.ServerOptionDelegate != null)
+                                {
+                                    // Add data to handshake buffer for parsing
+                                    _handshakeBuffer.EnsureAvailableSpace(bytesRead);
+                                    readBuffer.Slice(0, bytesRead).CopyTo(_handshakeBuffer.AvailableMemory);
+                                    _handshakeBuffer.Commit(bytesRead);
+
+                                    // Try to parse ClientHello if we have enough data
+                                    if (await TryParseClientHelloAndCallDelegate(cancellationToken).ConfigureAwait(false))
+                                    {
+                                        // ClientHello parsed and delegate called, forward remaining data to Network Framework
+                                        await WriteInboundWireDataAsync(_handshakeBuffer.ActiveMemory).ConfigureAwait(false);
+                                        _handshakeBuffer.Discard(_handshakeBuffer.ActiveLength);
+                                    }
+                                    else
+                                    {
+                                        // Not enough data yet or not a ClientHello, just forward to Network Framework
+                                        await WriteInboundWireDataAsync(readBuffer.Slice(0, bytesRead)).ConfigureAwait(false);
+                                    }
+                                }
+                                else
+                                {
+                                    // For client or server without ServerOptionDelegate, directly forward data
+                                    await WriteInboundWireDataAsync(readBuffer.Slice(0, bytesRead)).ConfigureAwait(false);
+                                }
                             }
                             else
                             {
-                                // EOF reached, signal completion
-                                _transportReadTcs.TrySetResult(final: true);
-
-                                // TODO: can this race with actual handshake completion?
-                                Interop.NetworkFramework.Tls.NwConnectionCancel(ConnectionHandle);
+                                // EOF reached during handshake, this shouldn't happen normally
+                                _handshakeCompletionSource.TrySetException(new IOException("Unexpected end of stream during handshake"));
                                 break;
                             }
+                        }
+
+                        // Handshake completed, now create the transport read task for post-handshake data
+                        if (_handshakeCompleted && !_shutdownCts.IsCancellationRequested)
+                        {
+                            CreateTransportReadTask();
                         }
                     }
                     finally
@@ -172,8 +219,140 @@ namespace System.Net.Security
                     _currentWriteCompletionSource?.TrySetException(ex);
                 }
             }, cancellationToken);
+        }
 
-            return await _handshakeCompletionSource.Task.ConfigureAwait(false);
+        private async Task<bool> TryParseClientHelloAndCallDelegate(CancellationToken cancellationToken)
+        {
+            // Check if we have enough data for a TLS frame header
+            if (_handshakeBuffer.ActiveLength < TlsFrameHelper.HeaderSize)
+            {
+                return false;
+            }
+
+            ReadOnlySpan<byte> data = _handshakeBuffer.ActiveSpan;
+
+            // Try to get frame header
+            if (!TlsFrameHelper.TryGetFrameHeader(data, ref _lastFrame.Header))
+            {
+                return false;
+            }
+
+            int frameSize = _lastFrame.Header.Length;
+            if (_handshakeBuffer.ActiveLength < frameSize + TlsFrameHelper.HeaderSize)
+            {
+                // Not enough data for complete frame
+                return false;
+            }
+
+            // Check if this is a handshake frame with ClientHello
+            if (_lastFrame.Header.Type == TlsContentType.Handshake)
+            {
+                const int HandshakeTypeOffsetSsl2 = 2;
+                const int HandshakeTypeOffsetTls = 5;
+
+#pragma warning disable CS0618
+                int handshakeTypeOffset = _lastFrame.Header.Version == SslProtocols.Ssl2 ? HandshakeTypeOffsetSsl2 : HandshakeTypeOffsetTls;
+#pragma warning restore CS0618
+
+                if (data.Length > handshakeTypeOffset &&
+                    data[handshakeTypeOffset] == (byte)TlsHandshakeType.ClientHello)
+                {
+                    // Parse ClientHello for SNI and other extensions
+                    TlsFrameHelper.ProcessingOptions options = NetEventSource.Log.IsEnabled() ?
+                                                                TlsFrameHelper.ProcessingOptions.All :
+                                                                TlsFrameHelper.ProcessingOptions.ServerName;
+
+                    // macOS cannot process ALPN on server at the moment.
+                    // We fallback to our own process similar to SNI bellow.
+                    options |= TlsFrameHelper.ProcessingOptions.RawApplicationProtocol;
+
+                    if (TlsFrameHelper.TryGetFrameInfo(data, ref _lastFrame, options))
+                    {
+                        if (_lastFrame.HandshakeType == TlsHandshakeType.ClientHello)
+                        {
+                            // Update SNI if present
+                            if (_lastFrame.TargetName != null)
+                            {
+                                SslAuthenticationOptions.TargetHost = _lastFrame.TargetName;
+                            }
+
+                            // Call ServerOptionDelegate if present
+                            if (SslAuthenticationOptions.ServerOptionDelegate != null)
+                            {
+                                try
+                                {
+                                    SslServerAuthenticationOptions userOptions =
+                                        await SslAuthenticationOptions.ServerOptionDelegate(_sslStream,
+                                            new SslClientHelloInfo(SslAuthenticationOptions.TargetHost, _lastFrame.SupportedVersions),
+                                            SslAuthenticationOptions.UserState, cancellationToken).ConfigureAwait(false);
+                                    SslAuthenticationOptions.UpdateOptions(userOptions);
+
+                                    if (NetEventSource.Log.IsEnabled())
+                                    {
+                                        NetEventSource.Log.ReceivedFrame(_sslStream, _lastFrame);
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    _handshakeCompletionSource.TrySetException(ex);
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+
+                    return true; // Successfully processed ClientHello
+                }
+            }
+
+            return false; // Not a ClientHello frame
+        }
+
+        private void CreateTransportReadTask()
+        {
+            _transportReadTask = Task.Run(async () =>
+            {
+                try
+                {
+                    byte[] buffer = ArrayPool<byte>.Shared.Rent(16 * 1024);
+                    try
+                    {
+                        Memory<byte> readBuffer = new Memory<byte>(buffer);
+
+                        while (!_shutdownCts.IsCancellationRequested)
+                        {
+                            // Read data from the transport stream (post-handshake)
+                            int bytesRead = await TransportStream.ReadAsync(readBuffer, _shutdownCts.Token).ConfigureAwait(false);
+
+                            if (bytesRead > 0)
+                            {
+                                // Process the read data for application data
+                                await WriteInboundWireDataAsync(readBuffer.Slice(0, bytesRead)).ConfigureAwait(false);
+                            }
+                            else
+                            {
+                                // EOF reached, signal completion
+                                _transportReadTcs.TrySetResult(final: true);
+                                Interop.NetworkFramework.Tls.NwConnectionCancel(ConnectionHandle);
+                                break;
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        ArrayPool<byte>.Shared.Return(buffer);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    // Handle cancellation gracefully
+                }
+                catch (Exception ex)
+                {
+                    // Propagate transport stream exceptions
+                    _currentWriteCompletionSource?.TrySetException(ex);
+                }
+            });
         }
 
         internal async Task WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken)
@@ -378,6 +557,15 @@ namespace System.Net.Security
             }
         }
 
+        private static void ValidateServerCertificateRequirements(SslAuthenticationOptions options)
+        {
+            // For server-side connections, we need a certificate context (like SecureTransport)
+            if (options.IsServer && options.CertificateContext == null && options.ServerCertSelectionDelegate == null && options.CertSelectionDelegate == null)
+            {
+                throw new NotSupportedException(SR.net_ssl_io_no_server_cert);
+            }
+        }
+
         private static SafeNwHandle CreateConnectionHandle(SslAuthenticationOptions options, GCHandle thisHandle)
         {
             int alpnLength = GetAlpnProtocolListSerializedLength(options.ApplicationProtocols);
@@ -416,7 +604,7 @@ namespace System.Net.Security
                     fixed (byte* alpnPtr = alpn)
                     fixed (uint* ciphersPtr = ciphers)
                     {
-                        return Interop.NetworkFramework.Tls.NwConnectionCreate(options.IsServer, GCHandle.ToIntPtr(thisHandle), idnHost, alpnPtr, alpnLength, minProtocol, maxProtocol, ciphersPtr, ciphers.Length);
+                        return Interop.NetworkFramework.Tls.NwConnectionCreate(options.IsServer, GCHandle.ToIntPtr(thisHandle), idnHost, alpnPtr, alpnLength, minProtocol, maxProtocol, ciphersPtr, ciphers.Length, options.RemoteCertRequired);
                     }
                 }
             }
@@ -498,13 +686,19 @@ namespace System.Net.Security
 
                 Shutdown();
 
+                // Wait for the handshake task to complete
+                if (_handshakeTask is Task handshakeTask)
+                {
+                    // Ignore exceptions from the handshake task
+                    handshakeTask.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing).GetAwaiter().GetResult();
+                }
+
                 // Wait for the transport read task to complete
                 if (_transportReadTask is Task transportTask)
                 {
                     // Ignore exceptions from the transport task
                     transportTask.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing).GetAwaiter().GetResult();
                 }
-
 
                 // Wait for any pending app receive tasks so that we may safely dispose the app receive buffer.
                 if (_pendingAppReceiveBufferFillTask is Task t)
@@ -513,6 +707,7 @@ namespace System.Net.Security
                 }
 
                 _appReceiveBuffer.Dispose();
+                _handshakeBuffer.Dispose();
 
                 // wait for callback signalling connection has been truly closed.
                 _connectionClosedTcs.Task.GetAwaiter().GetResult();
@@ -582,19 +777,66 @@ namespace System.Net.Security
         }
 
         [UnmanagedCallersOnly]
-        private static IntPtr ChallengeCallback(IntPtr thisHandle, IntPtr acceptableIssuersHandle)
+        private static IntPtr ChallengeCallback(IntPtr thisHandle, IntPtr acceptableIssuersHandle, IntPtr sniHostnamePtr)
         {
             try
             {
+                byte[]? dummy = null;
                 SafeDeleteNwContext nwContext = ResolveThisHandle(thisHandle);
 
+                // For server-side connections, return server certificate immediately
+                if (nwContext.SslAuthenticationOptions.IsServer)
+                {
+                    if (NetEventSource.Log.IsEnabled())
+                    {
+                        NetEventSource.Info(nwContext, "Challenge callback for server certificate");
+                    }
+
+                    // Extract SNI hostname from native callback (replicate SslStream.IO.cs logic)
+                    string? sniHostname = null;
+                    if (sniHostnamePtr != IntPtr.Zero)
+                    {
+                        string? rawSniHostname = Marshal.PtrToStringAnsi(sniHostnamePtr);
+                        if (!string.IsNullOrEmpty(rawSniHostname))
+                        {
+                            // Convert punycode SNI back to Unicode for proper certificate selection
+                            sniHostname = TargetHostNameHelper.DenormalizeHostName(rawSniHostname);
+                            if (NetEventSource.Log.IsEnabled())
+                            {
+                                NetEventSource.Info(nwContext, $"SNI hostname: {rawSniHostname} -> {sniHostname}");
+                            }
+                        }
+                    }
+
+                    // Store original TargetHost and temporarily update with SNI (like SslStream.IO.cs)
+                    string originalTargetHost = nwContext.SslAuthenticationOptions.TargetHost;
+                    // Update TargetHost with SNI if available (replicate _sslAuthenticationOptions.TargetHost = _lastFrame.TargetName)
+                    if (!string.IsNullOrEmpty(sniHostname))
+                    {
+                        nwContext.SslAuthenticationOptions.TargetHost = sniHostname;
+                        if (NetEventSource.Log.IsEnabled())
+                        {
+                            NetEventSource.Info(nwContext, $"Updated TargetHost with SNI: {sniHostname}");
+                        }
+                    }
+
+                    if (nwContext.SslAuthenticationOptions.CertificateContext == null)
+                    {
+                        nwContext._sslStream.AcquireServerCredentials(ref dummy);
+                    }
+
+                    // Return server certificate from CertificateContext (like SecureTransport)
+                    return nwContext.SslAuthenticationOptions.CertificateContext?.TargetCertificate.Handle ?? IntPtr.Zero;
+                }
+
+                // Client-side certificate challenge
                 // the callback may end up being called multiple times for some reason.
                 // check if we've already processed the challenge callback
                 if (Interlocked.CompareExchange(ref nwContext._challengeCallbackCompleted, 1, 0) != 0)
                 {
                     if (NetEventSource.Log.IsEnabled())
                     {
-                        NetEventSource.Info(nwContext, $"ChallengeCallback already processed, returning cached result: {nwContext._selectedClientCertificate}");
+                        NetEventSource.Info(nwContext, $"Client challenge callback already processed, returning cached result: {nwContext._selectedClientCertificate}");
                     }
                     return nwContext._selectedClientCertificate;
                 }
@@ -602,7 +844,11 @@ namespace System.Net.Security
                 nwContext._acceptableIssuers = ExtractAcceptableIssuers(acceptableIssuersHandle);
                 Debug.Assert(nwContext._peerCertChainHandle != null, "Peer certificate chain handle should be set before challenge callback");
 
-                byte[]? dummy = null;
+                if (NetEventSource.Log.IsEnabled())
+                {
+                    NetEventSource.Info(nwContext, "Challenge callback for client certificate");
+                }
+
                 nwContext._sslStream.AcquireClientCredentials(ref dummy, true);
                 return nwContext._selectedClientCertificate = nwContext.SslAuthenticationOptions.CertificateContext?.TargetCertificate.Handle ?? IntPtr.Zero;
             }
@@ -655,7 +901,7 @@ namespace System.Net.Security
             }
         }
 
-        public override bool IsInvalid => ConnectionHandle.IsInvalid || (_framerHandle?.IsInvalid ?? true);
+        public override bool IsInvalid => ConnectionHandle == null || ConnectionHandle.IsInvalid || (_framerHandle?.IsInvalid ?? true);
 
         [UnmanagedCallersOnly]
         private static unsafe void StatusUpdateCallback(IntPtr thisHandle, NetworkFrameworkStatusUpdates statusUpdate, IntPtr data, IntPtr data2, Interop.NetworkFramework.NetworkFrameworkError* error)
@@ -720,11 +966,13 @@ namespace System.Net.Security
         private void FramerStartCallback(SafeNwHandle framerHandle)
         {
             _framerHandle = framerHandle;
+            _framerAvailableTcs.TrySetResult();
         }
 
         private void HandshakeFinished()
         {
             if (NetEventSource.Log.IsEnabled()) NetEventSource.Info(this, "TLS handshake completed successfully");
+            _handshakeCompleted = true;
             _handshakeCompletionSource.TrySetResult(null);
         }
 

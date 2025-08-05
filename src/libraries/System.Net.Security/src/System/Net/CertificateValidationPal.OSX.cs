@@ -35,12 +35,18 @@ namespace System.Net
 
             X509Certificate2? result = null;
 
-            SafeX509ChainHandle chainHandle = securityContext switch
+            SafeX509ChainHandle? chainHandle = securityContext switch
             {
-                SafeDeleteNwContext nwContext => nwContext.PeerX509ChainHandle!,
+                SafeDeleteNwContext nwContext => nwContext.PeerX509ChainHandle,
                 SafeDeleteSslContext sslContext => Interop.AppleCrypto.SslCopyCertChain(sslContext.SslContext),
                 _ => throw new ArgumentException("Invalid context type", nameof(securityContext))
             };
+
+            if (chainHandle == null || chainHandle.IsInvalid)
+            {
+                if (NetEventSource.Log.IsEnabled()) NetEventSource.Log.RemoteCertificate(null);
+                return null;
+            }
 
             try
             {
