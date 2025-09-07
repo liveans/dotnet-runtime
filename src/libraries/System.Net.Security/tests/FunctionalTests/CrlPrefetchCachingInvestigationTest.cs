@@ -163,25 +163,32 @@ namespace System.Net.Security.Tests
 
         private async Task PrefetchCrlInformationAsync()
         {
-            // Simulate pre-fetching CRL information by making requests to all CRL endpoints
+            // Fetch and cache CRL information by making requests to all CRL endpoints
             using var httpClient = new HttpClient();
 
-            // Fetch root CRL
+            // Fetch and cache root CRL
             if (_rootCA.CdpUri != null)
             {
                 var rootCrlResponse = await httpClient.GetAsync(_rootCA.CdpUri);
                 Assert.True(rootCrlResponse.IsSuccessStatusCode);
                 var rootCrlData = await rootCrlResponse.Content.ReadAsByteArrayAsync();
                 Assert.True(rootCrlData.Length > 0);
+                
+                // Cache the CRL using both P/Invoke and managed store
+                CacheCrlInStore(rootCrlData, "CA");
+                CacheCrlInStore(rootCrlData, "ROOT");
             }
 
-            // Fetch intermediate CRL
+            // Fetch and cache intermediate CRL
             if (_intermediateCA.CdpUri != null)
             {
                 var intermediateCrlResponse = await httpClient.GetAsync(_intermediateCA.CdpUri);
                 Assert.True(intermediateCrlResponse.IsSuccessStatusCode);
                 var intermediateCrlData = await intermediateCrlResponse.Content.ReadAsByteArrayAsync();
                 Assert.True(intermediateCrlData.Length > 0);
+                
+                // Cache the CRL using both P/Invoke and managed store
+                CacheCrlInStore(intermediateCrlData, "CA");
             }
         }
 
@@ -362,35 +369,76 @@ namespace System.Net.Security.Tests
 
         // P/Invoke declarations for Windows CRL caching APIs
         [DllImport("crypt32.dll", SetLastError = true)]
+        private static extern IntPtr CertCreateCRLContext(
+            uint dwCertEncodingType,
+            byte[] pbCrlEncoded,
+            uint cbCrlEncoded);
+
+        [DllImport("crypt32.dll", SetLastError = true)]
+        private static extern bool CertAddCRLContextToStore(
+            IntPtr hCertStore,
+            IntPtr pCrlContext,
+            uint dwAddDisposition,
+            IntPtr ppStoreContext);
+
+        [DllImport("crypt32.dll", SetLastError = true)]
+        private static extern bool CertFreeCRLContext(IntPtr pCrlContext);
+
+        [DllImport("crypt32.dll", SetLastError = true)]
         private static extern bool CertControlStore(
             IntPtr hCertStore,
             uint dwFlags,
             uint dwCtrlType,
             IntPtr pvCtrlPara);
 
-        [DllImport("crypt32.dll", SetLastError = true)]
-        private static extern IntPtr CertOpenSystemStore(IntPtr hCryptProv, string szSubsystemProtocol);
-
-        [DllImport("crypt32.dll", SetLastError = true)]
-        private static extern bool CertCloseStore(IntPtr hCertStore, uint dwFlags);
-
-        [DllImport("wininet.dll", SetLastError = true)]
-        private static extern bool InternetQueryOption(
-            IntPtr hInternet,
-            uint dwOption,
-            IntPtr lpBuffer,
-            ref uint lpdwBufferLength);
-
-        [DllImport("wininet.dll", SetLastError = true)]
-        private static extern bool InternetSetOption(
-            IntPtr hInternet,
-            uint dwOption,
-            IntPtr lpBuffer,
-            uint dwBufferLength);
-
+        private const uint X509_ASN_ENCODING = 0x00000001;
+        private const uint PKCS_7_ASN_ENCODING = 0x00010000;
+        private const uint CERT_STORE_ADD_REPLACE_EXISTING = 3;
         private const uint CERT_STORE_CTRL_RESYNC = 1;
-        private const uint CERT_STORE_CTRL_NOTIFY_CHANGE = 2;
-        private const uint INTERNET_OPTION_REFRESH = 37;
+
+        private void CacheCrlInStore(byte[] crlData, string storeName)
+        {
+            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows) || crlData == null || crlData.Length == 0)
+                return;
+
+            try
+            {
+                // Use managed X509Store to get store handle, then P/Invoke for CRL-specific operations
+                using var store = new X509Store(storeName, StoreLocation.LocalMachine);
+                store.Open(OpenFlags.ReadWrite);
+                
+                var storeHandle = store.StoreHandle;
+                if (storeHandle != IntPtr.Zero)
+                {
+                    // Create CRL context using P/Invoke (similar to your C code example)
+                    IntPtr pCrl = CertCreateCRLContext(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, crlData, (uint)crlData.Length);
+                    if (pCrl != IntPtr.Zero)
+                    {
+                        try
+                        {
+                            // Add CRL to the managed store using its handle
+                            bool success = CertAddCRLContextToStore(storeHandle, pCrl, CERT_STORE_ADD_REPLACE_EXISTING, IntPtr.Zero);
+                            Debug.WriteLine($"CRL cached in {storeName} store: {success}");
+                            
+                            if (success)
+                            {
+                                // Force store resynchronization after successful CRL addition
+                                CertControlStore(storeHandle, 0, CERT_STORE_CTRL_RESYNC, IntPtr.Zero);
+                                Debug.WriteLine($"Store resync triggered for {storeName}");
+                            }
+                        }
+                        finally
+                        {
+                            CertFreeCRLContext(pCrl);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Failed to cache CRL in {storeName} store: {ex.Message}");
+            }
+        }
 
         private void CacheCrlViaWinApi(string crlUrl)
         {
@@ -399,21 +447,16 @@ namespace System.Net.Security.Tests
 
             try
             {
-                // Force system to cache CRL from the given URL
-                // This is a simplified example - real implementation would be more complex
+                // Force system to cache CRL from the given URL using managed store handle
+                using var store = new X509Store("CA", StoreLocation.LocalMachine);
+                store.Open(OpenFlags.ReadWrite);
                 
-                IntPtr systemStore = CertOpenSystemStore(IntPtr.Zero, "CA");
-                if (systemStore != IntPtr.Zero)
+                var storeHandle = store.StoreHandle;
+                if (storeHandle != IntPtr.Zero)
                 {
-                    try
-                    {
-                        // Force store resynchronization to potentially cache new CRL data
-                        CertControlStore(systemStore, 0, CERT_STORE_CTRL_RESYNC, IntPtr.Zero);
-                    }
-                    finally
-                    {
-                        CertCloseStore(systemStore, 0);
-                    }
+                    // Force store resynchronization to potentially cache new CRL data
+                    CertControlStore(storeHandle, 0, CERT_STORE_CTRL_RESYNC, IntPtr.Zero);
+                    Debug.WriteLine($"Store resync triggered for CRL URL: {crlUrl}");
                 }
             }
             catch (Exception ex)
@@ -429,9 +472,21 @@ namespace System.Net.Security.Tests
 
             try
             {
-                // Refresh internet options to force CRL caching
-                uint bufferSize = 0;
-                InternetSetOption(IntPtr.Zero, INTERNET_OPTION_REFRESH, IntPtr.Zero, 0);
+                // Force resync on multiple certificate stores using managed APIs
+                string[] storeNames = { "CA", "ROOT", "My" };
+                
+                foreach (string storeName in storeNames)
+                {
+                    using var store = new X509Store(storeName, StoreLocation.LocalMachine);
+                    store.Open(OpenFlags.ReadWrite);
+                    
+                    var storeHandle = store.StoreHandle;
+                    if (storeHandle != IntPtr.Zero)
+                    {
+                        CertControlStore(storeHandle, 0, CERT_STORE_CTRL_RESYNC, IntPtr.Zero);
+                        Debug.WriteLine($"System store {storeName} resync completed");
+                    }
+                }
             }
             catch (Exception ex)
             {
