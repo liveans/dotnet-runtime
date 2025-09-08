@@ -471,7 +471,7 @@ namespace System.Net.Security.Tests
             public uint dwHighDateTime;
         }
 
-        [DllImport("crypt32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CryptRetrieveObjectByUrlW")]
+        [DllImport("cryptnet.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CryptRetrieveObjectByUrlW")]
         private static extern bool CryptRetrieveObjectByUrl(
             [MarshalAs(UnmanagedType.LPWStr)] string pszUrl,
             [MarshalAs(UnmanagedType.LPStr)] string pszObjectOid,
@@ -484,7 +484,7 @@ namespace System.Net.Security.Tests
             IntPtr pAuxInfo
         );
 
-        [DllImport("crypt32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CryptFlushTimeValidObjectW")]
+        [DllImport("cryptnet.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CryptFlushTimeValidObjectW")]
         private static extern bool CryptFlushTimeValidObject(
             [MarshalAs(UnmanagedType.LPWStr)] string pszFlushTimeValidOid,
             IntPtr pvPara,
