@@ -405,13 +405,6 @@ namespace System.Net.Security.Tests
                             // Add CRL to the managed store using its handle
                             bool success = CertAddCRLContextToStore(storeHandle, pCrl, CERT_STORE_ADD_REPLACE_EXISTING, IntPtr.Zero);
                             Console.WriteLine($"CRL cached in {storeName} store: {success}");
-                            
-                            if (success)
-                            {
-                                // Force store resynchronization after successful CRL addition
-                                CertControlStore(storeHandle, 0, CERT_STORE_CTRL_RESYNC, IntPtr.Zero);
-                                Console.WriteLine($"Store resync triggered for {storeName}");
-                            }
                         }
                         finally
                         {
