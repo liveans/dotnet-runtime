@@ -622,10 +622,7 @@ namespace System.Net.Security.Tests
             if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows) || crlData == null || crlData.Length == 0)
                 return false;
 
-            string tempFile = null;
             IntPtr pCRL = IntPtr.Zero;
-            IntPtr pPreFetchInfo = IntPtr.Zero;
-            IntPtr pAuxInfo = IntPtr.Zero;
             
             try
             {
@@ -637,6 +634,33 @@ namespace System.Net.Security.Tests
                     return false;
                 }
                 CertFreeCRLContext(pCrlValidate);
+
+                // Step 2: Try to trigger cache update by attempting retrieval with cache-only first
+                Console.WriteLine($"Checking if CRL is already cached for: {originalUrl}");
+                bool cacheCheck = CryptRetrieveObjectByUrl(
+                    originalUrl,
+                    CONTEXT_OID_CRL,
+                    CRYPT_CACHE_ONLY_RETRIEVAL,
+                    0,
+                    ref pCRL,
+                    IntPtr.Zero,
+                    IntPtr.Zero,
+                    IntPtr.Zero,
+                    IntPtr.Zero
+                );
+
+                if (cacheCheck && pCRL != IntPtr.Zero)
+                {
+                    Console.WriteLine($"CRL already cached for: {originalUrl}");
+                    CertFreeCRLContext(pCRL);
+                    pCRL = IntPtr.Zero;
+                    return true;
+                }
+                else
+                {
+                    int cacheError = Marshal.GetLastWin32Error();
+                    Console.WriteLine($"CRL not in cache (error: {cacheError}), will use fallback approach");
+                }
 
                 // Step 2: Write to temporary file for file:// URL approach
                 tempFile = Path.Combine(Path.GetTempPath(), $"crl_{Guid.NewGuid()}.crl");
@@ -751,8 +775,20 @@ namespace System.Net.Security.Tests
                     
                     if (!anySuccess)
                     {
-                        Console.WriteLine("All URL formats failed");
-                        return false;
+                        Console.WriteLine("All URL formats failed, trying fallback to certificate store approach");
+                        
+                        // Fallback: Use the traditional certificate store approach
+                        try
+                        {
+                            CacheCrlInStore(crlData, StoreName.CertificateAuthority);
+                            Console.WriteLine("Fallback to certificate store succeeded");
+                            return true;
+                        }
+                        catch (Exception fallbackEx)
+                        {
+                            Console.WriteLine($"Certificate store fallback also failed: {fallbackEx.Message}");
+                            return false;
+                        }
                     }
                     else
                     {
