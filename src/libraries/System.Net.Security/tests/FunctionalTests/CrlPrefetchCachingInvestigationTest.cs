@@ -641,10 +641,25 @@ namespace System.Net.Security.Tests
                 // Step 2: Write to temporary file for file:// URL approach
                 tempFile = Path.Combine(Path.GetTempPath(), $"crl_{Guid.NewGuid()}.crl");
                 File.WriteAllBytes(tempFile, crlData);
+                Console.WriteLine($"Created temp file: {tempFile}");
+                Console.WriteLine($"File exists: {File.Exists(tempFile)}");
+                Console.WriteLine($"File size: {new FileInfo(tempFile).Length} bytes");
 
-                // Step 3: Create file:// URL
+                // Step 3: Create file:// URL - multiple approaches for Windows compatibility
                 string fileUrl = new Uri(tempFile).AbsoluteUri;
-                Console.WriteLine($"Using temp file URL: {fileUrl}");
+                Console.WriteLine($"Uri.AbsoluteUri result: {fileUrl}");
+                
+                // Alternative format for Windows
+                string altFileUrl = "file:///" + Path.GetFullPath(tempFile).Replace('\\', '/');
+                Console.WriteLine($"Alternative file URL: {altFileUrl}");
+                
+                // Try the UriBuilder approach
+                var uriBuilder = new UriBuilder("file", "", 0, Path.GetFullPath(tempFile));
+                string uriBuilderUrl = uriBuilder.ToString();
+                Console.WriteLine($"UriBuilder result: {uriBuilderUrl}");
+                
+                // Use the standard Uri approach first
+                Console.WriteLine($"Using standard file URL: {fileUrl}");
 
                 // Step 4: Set up pre-fetch info
                 var preFetchInfo = new CRYPTNET_URL_CACHE_PRE_FETCH_INFO
@@ -702,29 +717,45 @@ namespace System.Net.Security.Tests
                     int error = Marshal.GetLastWin32Error();
                     Console.WriteLine($"CryptRetrieveObjectByUrl failed with error: {error} (0x{error:X})");
                     
-                    // Try simpler approach without aux info
-                    Console.WriteLine("Retrying without auxiliary info...");
-                    bool retryResult = CryptRetrieveObjectByUrl(
-                        fileUrl,
-                        CONTEXT_OID_CRL,
-                        CRYPT_STICKY_CACHE_RETRIEVAL,
-                        30000,
-                        ref pCRL,
-                        IntPtr.Zero,
-                        IntPtr.Zero,
-                        IntPtr.Zero,
-                        IntPtr.Zero
-                    );
+                    // Try alternative URL formats
+                    string[] urlsToTry = { altFileUrl, uriBuilderUrl };
+                    bool anySuccess = false;
                     
-                    if (!retryResult)
+                    foreach (string altUrl in urlsToTry)
                     {
-                        int retryError = Marshal.GetLastWin32Error();
-                        Console.WriteLine($"Retry also failed with error: {retryError} (0x{retryError:X})");
+                        Console.WriteLine($"Trying alternative URL: {altUrl}");
+                        bool altResult = CryptRetrieveObjectByUrl(
+                            altUrl,
+                            CONTEXT_OID_CRL,
+                            CRYPT_STICKY_CACHE_RETRIEVAL,
+                            30000,
+                            ref pCRL,
+                            IntPtr.Zero,
+                            IntPtr.Zero,
+                            IntPtr.Zero,
+                            IntPtr.Zero
+                        );
+                        
+                        if (altResult)
+                        {
+                            Console.WriteLine($"Success with alternative URL: {altUrl}");
+                            anySuccess = true;
+                            break;
+                        }
+                        else
+                        {
+                            int altError = Marshal.GetLastWin32Error();
+                            Console.WriteLine($"Alternative URL failed with error: {altError} (0x{altError:X})");
+                        }
+                    }
+                    
+                    if (!anySuccess)
+                    {
+                        Console.WriteLine("All URL formats failed");
                         return false;
                     }
                     else
                     {
-                        Console.WriteLine("Retry succeeded without auxiliary info");
                         result = true;
                     }
                 }
