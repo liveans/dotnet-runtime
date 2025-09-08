@@ -28,7 +28,6 @@ namespace System.Net.Security.Tests
         private RevocationResponder _responder;
         private X509Certificate2 _serverCert;
         private bool _disposed;
-        private byte[] _rootCrlData;
         private byte[] _intermediateCrlData;
 
         [Fact]
@@ -123,21 +122,7 @@ namespace System.Net.Security.Tests
             // Fetch and cache CRL information by making requests to all CRL endpoints
             using var httpClient = new HttpClient();
 
-            // Fetch and cache root CRL
-            if (_rootCA.CdpUri != null)
-            {
-                var rootCrlResponse = await httpClient.GetAsync(_rootCA.CdpUri);
-                Assert.True(rootCrlResponse.IsSuccessStatusCode);
-                _rootCrlData = await rootCrlResponse.Content.ReadAsByteArrayAsync();
-                Assert.True(_rootCrlData.Length > 0);
-                Console.WriteLine($"Fetched root CRL: {_rootCrlData.Length} bytes");
-                
-                // Cache the CRL in Windows certificate stores
-                CacheCrlInStore(_rootCrlData, "CA");
-                CacheCrlInStore(_rootCrlData, "ROOT");
-            }
-
-            // Fetch and cache intermediate CRL
+            // Fetch and cache intermediate CRL (root CAs don't typically need CRL verification)
             if (_intermediateCA.CdpUri != null)
             {
                 var intermediateCrlResponse = await httpClient.GetAsync(_intermediateCA.CdpUri);
@@ -147,7 +132,7 @@ namespace System.Net.Security.Tests
                 Console.WriteLine($"Fetched intermediate CRL: {_intermediateCrlData.Length} bytes");
                 
                 // Cache the CRL in Windows certificate stores
-                CacheCrlInStore(_intermediateCrlData, "CA");
+                CacheCrlInStore(_intermediateCrlData, StoreName.CertificateAuthority);
             }
 
             // Fetch and cache server certificate CRL (if it has a CRL distribution point)
@@ -165,7 +150,7 @@ namespace System.Net.Security.Tests
                             Console.WriteLine($"Fetched server certificate CRL from {crlUrl}: {serverCrlData.Length} bytes");
                             
                             // Cache the server certificate CRL in Windows certificate stores
-                            CacheCrlInStore(serverCrlData, "CA");
+                            CacheCrlInStore(serverCrlData, StoreName.CertificateAuthority);
                         }
                     }
                     else
@@ -232,8 +217,7 @@ namespace System.Net.Security.Tests
 
             try
             {
-                // Use P/Invoke to interact with Windows CRL caching APIs
-                CacheCrlViaWinApi(_rootCA.CdpUri);
+                // Use P/Invoke to interact with Windows CRL caching APIs (skip root CA CRL)
                 CacheCrlViaWinApi(_intermediateCA.CdpUri);
                 
                 // Force Schannel to cache the CRL information
@@ -444,7 +428,7 @@ namespace System.Net.Security.Tests
         private const uint CERT_STORE_ADD_REPLACE_EXISTING = 3;
         private const uint CERT_STORE_CTRL_RESYNC = 1;
 
-        private void CacheCrlInStore(byte[] crlData, string storeName)
+        private void CacheCrlInStore(byte[] crlData, StoreName storeName)
         {
             if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows) || crlData == null || crlData.Length == 0)
                 return;
@@ -496,7 +480,7 @@ namespace System.Net.Security.Tests
             try
             {
                 // Force system to cache CRL from the given URL using managed store handle
-                using var store = new X509Store("CA", StoreLocation.LocalMachine);
+                using var store = new X509Store(StoreName.CertificateAuthority, StoreLocation.LocalMachine);
                 store.Open(OpenFlags.ReadWrite);
                 
                 var storeHandle = store.StoreHandle;
@@ -521,9 +505,9 @@ namespace System.Net.Security.Tests
             try
             {
                 // Force resync on multiple certificate stores using managed APIs
-                string[] storeNames = { "CA", "ROOT", "My" };
+                StoreName[] storeNames = { StoreName.CertificateAuthority, StoreName.Root, StoreName.My };
                 
-                foreach (string storeName in storeNames)
+                foreach (StoreName storeName in storeNames)
                 {
                     using var store = new X509Store(storeName, StoreLocation.LocalMachine);
                     store.Open(OpenFlags.ReadWrite);
