@@ -107,7 +107,7 @@ namespace System.Net.Security.Tests
         {
             // Use CertificateAuthority.BuildPrivatePki to create proper certificates with private keys
             CertificateAuthority.BuildPrivatePki(
-                PkiOptions.EndEntityRevocationViaCrl,
+                PkiOptions.CrlEverywhere, // Enable CRL for both intermediate and end-entity certificates
                 out _responder,
                 out _rootCA,
                 out var intermediateAuthorities,
@@ -125,10 +125,38 @@ namespace System.Net.Security.Tests
 
         private async Task PrefetchCrlInformationAsync()
         {
-            // Fetch and cache CRL information only for the server certificate
+            // Fetch and cache CRL information for both intermediate CA and server certificate
             using var httpClient = new HttpClient();
 
-            // Fetch and cache server certificate CRL (this is what we need for revocation checking)
+            // Fetch and cache intermediate CA CRL (to verify intermediate CA hasn't been revoked by root)
+            if (_intermediateCA.CdpUri != null)
+            {
+                try
+                {
+                    var intermediateCrlResponse = await httpClient.GetAsync(_intermediateCA.CdpUri);
+                    if (intermediateCrlResponse.IsSuccessStatusCode)
+                    {
+                        var intermediateCrlData = await intermediateCrlResponse.Content.ReadAsByteArrayAsync();
+                        if (intermediateCrlData.Length > 0)
+                        {
+                            Console.WriteLine($"Fetched intermediate CA CRL: {intermediateCrlData.Length} bytes");
+                            
+                            // Cache the intermediate CA CRL in Windows certificate stores
+                            CacheCrlInStore(intermediateCrlData, StoreName.CertificateAuthority);
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine($"Failed to fetch intermediate CRL: {intermediateCrlResponse.StatusCode}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error fetching intermediate CRL: {ex.Message}");
+                }
+            }
+
+            // Fetch and cache server certificate CRL (to verify server certificate hasn't been revoked)
             var serverCrlUrls = GetCrlDistributionPoints(_serverCert);
             foreach (string crlUrl in serverCrlUrls)
             {
