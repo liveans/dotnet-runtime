@@ -434,6 +434,68 @@ namespace System.Net.Security.Tests
 
         #region Windows P/Invoke for CRL Caching
 
+        // Enhanced P/Invoke declarations for Windows CRL caching APIs
+        [StructLayout(LayoutKind.Sequential)]
+        private struct CRYPTNET_URL_CACHE_PRE_FETCH_INFO
+        {
+            public uint cbSize;
+            public uint dwObjectType;
+            public uint dwError;
+            public uint dwReserved;
+            public FILETIME ThisUpdateTime;
+            public FILETIME NextUpdateTime;
+            public FILETIME PublishTime;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct CRYPT_RETRIEVE_AUX_INFO
+        {
+            public uint cbSize;
+            public IntPtr pLastSyncTime;
+            public uint dwMaxUrlRetrievalByteCount;
+            public IntPtr pPreFetchInfo;
+            public IntPtr pFlushInfo;
+            public IntPtr ppResponseInfo;
+            public IntPtr pwszCacheFileNamePrefix;
+            public IntPtr pftCacheResync;
+            public bool fProxyCache;
+            public uint dwHttpStatusCode;
+            public IntPtr ppwszErrorResponseHeaders;
+            public IntPtr ppErrorContentBlob;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FILETIME
+        {
+            public uint dwLowDateTime;
+            public uint dwHighDateTime;
+        }
+
+        [DllImport("crypt32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool CryptRetrieveObjectByUrl(
+            string pszUrl,
+            string pszObjectOid,
+            uint dwRetrievalFlags,
+            uint dwTimeout,
+            ref IntPtr ppvObject,
+            IntPtr hAsyncRetrieve,
+            IntPtr pCredentials,
+            IntPtr pvVerify,
+            IntPtr pAuxInfo
+        );
+
+        [DllImport("crypt32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool CryptFlushTimeValidObject(
+            string pszFlushTimeValidOid,
+            IntPtr pvPara,
+            IntPtr pIssuer,
+            uint dwFlags,
+            IntPtr pvReserved
+        );
+
+        [DllImport("kernel32.dll")]
+        private static extern void GetSystemTimeAsFileTime(out FILETIME lpSystemTimeAsFileTime);
+
         // P/Invoke declarations for Windows CRL caching APIs
         [DllImport("crypt32.dll", SetLastError = true)]
         private static extern IntPtr CertCreateCRLContext(
@@ -462,6 +524,16 @@ namespace System.Net.Security.Tests
         private const uint PKCS_7_ASN_ENCODING = 0x00010000;
         private const uint CERT_STORE_ADD_REPLACE_EXISTING = 3;
         private const uint CERT_STORE_CTRL_RESYNC = 1;
+        
+        // Cryptnet cache constants
+        private const uint CRYPT_CACHE_ONLY_RETRIEVAL = 0x00000002;
+        private const uint CRYPT_WIRE_ONLY_RETRIEVAL = 0x00000004;
+        private const uint CRYPT_STICKY_CACHE_RETRIEVAL = 0x00001000;
+        private const uint CRYPT_VERIFY_CONTEXT_SIGNATURE = 0x00000020;
+        private const uint CRYPT_OFFLINE_CHECK_RETRIEVAL = 0x00004000;
+        private const string CONTEXT_OID_CRL = "2";
+        private const string TIME_VALID_OID_FLUSH_CRL = "TIME_VALID_OID_FLUSH_CRL";
+        private const uint CRYPTNET_URL_CACHE_PRE_FETCH_CRL = 2;
 
         private void CacheCrlInStore(byte[] crlData, StoreName storeName)
         {
@@ -500,6 +572,157 @@ namespace System.Net.Security.Tests
             }
         }
 
+        private async Task PrefetchCrlInformationViaCryptnetAsync()
+        {
+            // Alternative approach using Cryptnet URL cache system
+            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                return;
+                
+            Console.WriteLine("=== Using Cryptnet Cache Approach ===");
+            using var httpClient = new HttpClient();
+
+            // Fetch and cache intermediate CA CRL using Cryptnet cache
+            if (_intermediateCA.CdpUri != null)
+            {
+                try
+                {
+                    var intermediateCrlData = await httpClient.GetByteArrayAsync(_intermediateCA.CdpUri);
+                    Console.WriteLine($"Fetched intermediate CA CRL via HttpClient: {intermediateCrlData.Length} bytes");
+                    
+                    bool cached = CacheCRLViaCryptnet(intermediateCrlData, _intermediateCA.CdpUri);
+                    Console.WriteLine($"Intermediate CRL cached via Cryptnet: {cached}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error fetching intermediate CRL via Cryptnet: {ex.Message}");
+                }
+            }
+
+            // Fetch and cache server certificate CRL using Cryptnet cache
+            var serverCrlUrls = GetCrlDistributionPoints(_serverCert);
+            foreach (string crlUrl in serverCrlUrls)
+            {
+                try
+                {
+                    var serverCrlData = await httpClient.GetByteArrayAsync(crlUrl);
+                    Console.WriteLine($"Fetched server certificate CRL via HttpClient from {crlUrl}: {serverCrlData.Length} bytes");
+                    
+                    bool cached = CacheCRLViaCryptnet(serverCrlData, crlUrl);
+                    Console.WriteLine($"Server CRL cached via Cryptnet: {cached}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error fetching server CRL from {crlUrl} via Cryptnet: {ex.Message}");
+                }
+            }
+        }
+
+        private bool CacheCRLViaCryptnet(byte[] crlData, string originalUrl)
+        {
+            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows) || crlData == null || crlData.Length == 0)
+                return false;
+
+            string tempFile = null;
+            IntPtr pCRL = IntPtr.Zero;
+            IntPtr pPreFetchInfo = IntPtr.Zero;
+            IntPtr pAuxInfo = IntPtr.Zero;
+            
+            try
+            {
+                // Step 1: Validate CRL data
+                IntPtr pCrlValidate = CertCreateCRLContext(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, crlData, (uint)crlData.Length);
+                if (pCrlValidate == IntPtr.Zero)
+                {
+                    Console.WriteLine("Invalid CRL data for Cryptnet caching");
+                    return false;
+                }
+                CertFreeCRLContext(pCrlValidate);
+
+                // Step 2: Write to temporary file for file:// URL approach
+                tempFile = Path.Combine(Path.GetTempPath(), $"crl_{Guid.NewGuid()}.crl");
+                File.WriteAllBytes(tempFile, crlData);
+
+                // Step 3: Create file:// URL
+                string fileUrl = new Uri(tempFile).AbsoluteUri;
+                Console.WriteLine($"Using temp file URL: {fileUrl}");
+
+                // Step 4: Set up pre-fetch info
+                var preFetchInfo = new CRYPTNET_URL_CACHE_PRE_FETCH_INFO
+                {
+                    cbSize = (uint)Marshal.SizeOf<CRYPTNET_URL_CACHE_PRE_FETCH_INFO>(),
+                    dwObjectType = CRYPTNET_URL_CACHE_PRE_FETCH_CRL,
+                    dwError = 0,
+                    dwReserved = 0
+                };
+
+                // Get current time for CRL update times
+                GetSystemTimeAsFileTime(out preFetchInfo.ThisUpdateTime);
+                ulong fileTime = ((ulong)preFetchInfo.ThisUpdateTime.dwHighDateTime << 32) | preFetchInfo.ThisUpdateTime.dwLowDateTime;
+                fileTime += 864000000000; // Add 24 hours
+                preFetchInfo.NextUpdateTime.dwLowDateTime = (uint)(fileTime & 0xFFFFFFFF);
+                preFetchInfo.NextUpdateTime.dwHighDateTime = (uint)(fileTime >> 32);
+                preFetchInfo.PublishTime = preFetchInfo.ThisUpdateTime;
+
+                pPreFetchInfo = Marshal.AllocHGlobal(Marshal.SizeOf(preFetchInfo));
+                Marshal.StructureToPtr(preFetchInfo, pPreFetchInfo, false);
+
+                var auxInfo = new CRYPT_RETRIEVE_AUX_INFO
+                {
+                    cbSize = (uint)Marshal.SizeOf<CRYPT_RETRIEVE_AUX_INFO>(),
+                    pPreFetchInfo = pPreFetchInfo,
+                    dwMaxUrlRetrievalByteCount = 100 * 1024 * 1024 // 100MB max
+                };
+
+                pAuxInfo = Marshal.AllocHGlobal(Marshal.SizeOf(auxInfo));
+                Marshal.StructureToPtr(auxInfo, pAuxInfo, false);
+
+                // Step 5: Cache via CryptRetrieveObjectByUrl with sticky cache
+                uint dwRetrievalFlags = CRYPT_STICKY_CACHE_RETRIEVAL | CRYPT_VERIFY_CONTEXT_SIGNATURE;
+                
+                bool result = CryptRetrieveObjectByUrl(
+                    fileUrl,
+                    CONTEXT_OID_CRL,
+                    dwRetrievalFlags,
+                    30000, // 30 second timeout
+                    ref pCRL,
+                    IntPtr.Zero,
+                    IntPtr.Zero,
+                    IntPtr.Zero,
+                    pAuxInfo
+                );
+
+                if (!result)
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    Console.WriteLine($"CryptRetrieveObjectByUrl failed with error: {error}");
+                    return false;
+                }
+
+                Console.WriteLine($"Successfully cached CRL via Cryptnet for URL: {originalUrl}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error in CacheCRLViaCryptnet: {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                // Clean up
+                if (pCRL != IntPtr.Zero)
+                    CertFreeCRLContext(pCRL);
+                if (pPreFetchInfo != IntPtr.Zero)
+                    Marshal.FreeHGlobal(pPreFetchInfo);
+                if (pAuxInfo != IntPtr.Zero)
+                    Marshal.FreeHGlobal(pAuxInfo);
+
+                // Delete temp file
+                if (!string.IsNullOrEmpty(tempFile) && File.Exists(tempFile))
+                {
+                    try { File.Delete(tempFile); } catch { }
+                }
+            }
+        }
 
         private void FlushAndCacheSystemCrls()
         {
