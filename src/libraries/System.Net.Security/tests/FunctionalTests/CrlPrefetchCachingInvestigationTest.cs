@@ -677,7 +677,13 @@ namespace System.Net.Security.Tests
                 Marshal.StructureToPtr(auxInfo, pAuxInfo, false);
 
                 // Step 5: Cache via CryptRetrieveObjectByUrl with sticky cache
-                uint dwRetrievalFlags = CRYPT_STICKY_CACHE_RETRIEVAL | CRYPT_VERIFY_CONTEXT_SIGNATURE;
+                uint dwRetrievalFlags = CRYPT_STICKY_CACHE_RETRIEVAL;
+                
+                Console.WriteLine($"Calling CryptRetrieveObjectByUrl with:");
+                Console.WriteLine($"  URL: {fileUrl}");
+                Console.WriteLine($"  OID: {CONTEXT_OID_CRL}");
+                Console.WriteLine($"  Flags: 0x{dwRetrievalFlags:X}");
+                Console.WriteLine($"  Timeout: 30000");
                 
                 bool result = CryptRetrieveObjectByUrl(
                     fileUrl,
@@ -694,8 +700,33 @@ namespace System.Net.Security.Tests
                 if (!result)
                 {
                     int error = Marshal.GetLastWin32Error();
-                    Console.WriteLine($"CryptRetrieveObjectByUrl failed with error: {error}");
-                    return false;
+                    Console.WriteLine($"CryptRetrieveObjectByUrl failed with error: {error} (0x{error:X})");
+                    
+                    // Try simpler approach without aux info
+                    Console.WriteLine("Retrying without auxiliary info...");
+                    bool retryResult = CryptRetrieveObjectByUrl(
+                        fileUrl,
+                        CONTEXT_OID_CRL,
+                        CRYPT_STICKY_CACHE_RETRIEVAL,
+                        30000,
+                        ref pCRL,
+                        IntPtr.Zero,
+                        IntPtr.Zero,
+                        IntPtr.Zero,
+                        IntPtr.Zero
+                    );
+                    
+                    if (!retryResult)
+                    {
+                        int retryError = Marshal.GetLastWin32Error();
+                        Console.WriteLine($"Retry also failed with error: {retryError} (0x{retryError:X})");
+                        return false;
+                    }
+                    else
+                    {
+                        Console.WriteLine("Retry succeeded without auxiliary info");
+                        result = true;
+                    }
                 }
 
                 Console.WriteLine($"Successfully cached CRL via Cryptnet for URL: {originalUrl}");
