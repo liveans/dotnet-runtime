@@ -299,8 +299,7 @@ namespace System.Net.Security.Tests
             // Check if the only errors are acceptable revocation-related errors
             foreach (var status in chain.ChainStatus)
             {
-                if (status.Status != X509ChainStatusFlags.RevocationStatusUnknown &&
-                    status.Status != X509ChainStatusFlags.OfflineRevocation &&
+                if (status.Status != X509ChainStatusFlags.UntrustedRoot &&
                     status.Status != X509ChainStatusFlags.NoError)
                 {
                     return false;
