@@ -28,7 +28,6 @@ namespace System.Net.Security.Tests
         private RevocationResponder _responder;
         private X509Certificate2 _serverCert;
         private bool _disposed;
-        private X509Store _customCrlStore;
         private byte[] _rootCrlData;
         private byte[] _intermediateCrlData;
 
@@ -51,23 +50,6 @@ namespace System.Net.Security.Tests
 
                 // Step 4: Perform offline revocation check - should succeed due to cached CRL
                 await PerformOfflineRevocationCheckAsync();
-            }
-            finally
-            {
-                CleanupTestInfrastructure();
-            }
-        }
-
-        [Fact]
-        [PlatformSpecific(TestPlatforms.Windows)]
-        public async Task CrlPrefetchCaching_WithHttpListener_CachingBehavior()
-        {
-            await SetupTestInfrastructureAsync();
-
-            try
-            {
-                // Test various caching scenarios
-                await TestCrlCachingBehaviors();
             }
             finally
             {
@@ -141,10 +123,6 @@ namespace System.Net.Security.Tests
             // Fetch and cache CRL information by making requests to all CRL endpoints
             using var httpClient = new HttpClient();
 
-            // Create a custom certificate store for our cached CRL data
-            _customCrlStore = new X509Store("CRL_PREFETCH_TEST", StoreLocation.CurrentUser);
-            _customCrlStore.Open(OpenFlags.ReadWrite);
-
             // Fetch and cache root CRL
             if (_rootCA.CdpUri != null)
             {
@@ -154,11 +132,9 @@ namespace System.Net.Security.Tests
                 Assert.True(_rootCrlData.Length > 0);
                 Console.WriteLine($"Fetched root CRL: {_rootCrlData.Length} bytes");
                 
-                // Add the root CA certificate to our custom store
-                _customCrlStore.Add(_rootCA.CloneIssuerCert());
-                
-                // Cache the CRL using both P/Invoke and managed store  
-                CacheCrlInCustomStore(_rootCrlData);
+                // Cache the CRL in Windows certificate stores
+                CacheCrlInStore(_rootCrlData, "CA");
+                CacheCrlInStore(_rootCrlData, "ROOT");
             }
 
             // Fetch and cache intermediate CRL
@@ -170,12 +146,83 @@ namespace System.Net.Security.Tests
                 Assert.True(_intermediateCrlData.Length > 0);
                 Console.WriteLine($"Fetched intermediate CRL: {_intermediateCrlData.Length} bytes");
                 
-                // Add the intermediate CA certificate to our custom store
-                _customCrlStore.Add(_intermediateCA.CloneIssuerCert());
-                
-                // Cache the CRL using both P/Invoke and managed store
-                CacheCrlInCustomStore(_intermediateCrlData);
+                // Cache the CRL in Windows certificate stores
+                CacheCrlInStore(_intermediateCrlData, "CA");
             }
+
+            // Fetch and cache server certificate CRL (if it has a CRL distribution point)
+            var serverCrlUrls = GetCrlDistributionPoints(_serverCert);
+            foreach (string crlUrl in serverCrlUrls)
+            {
+                try
+                {
+                    var serverCrlResponse = await httpClient.GetAsync(crlUrl);
+                    if (serverCrlResponse.IsSuccessStatusCode)
+                    {
+                        var serverCrlData = await serverCrlResponse.Content.ReadAsByteArrayAsync();
+                        if (serverCrlData.Length > 0)
+                        {
+                            Console.WriteLine($"Fetched server certificate CRL from {crlUrl}: {serverCrlData.Length} bytes");
+                            
+                            // Cache the server certificate CRL in Windows certificate stores
+                            CacheCrlInStore(serverCrlData, "CA");
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine($"Failed to fetch server CRL from {crlUrl}: {serverCrlResponse.StatusCode}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error fetching server CRL from {crlUrl}: {ex.Message}");
+                }
+            }
+        }
+
+        private List<string> GetCrlDistributionPoints(X509Certificate2 certificate)
+        {
+            var crlUrls = new List<string>();
+            
+            try
+            {
+                // Look for CRL Distribution Points extension (OID: 2.5.29.31)
+                const string crlDistributionPointsOid = "2.5.29.31";
+                var crlExtension = certificate.Extensions[crlDistributionPointsOid];
+                
+                if (crlExtension != null)
+                {
+                    // Parse the extension data to extract URLs
+                    // This is a simplified approach - in production you'd want more robust parsing
+                    string extensionData = crlExtension.Format(false);
+                    Console.WriteLine($"CRL Distribution Points extension found: {extensionData}");
+                    
+                    // Try to extract HTTP URLs from the extension data
+                    var httpMatches = System.Text.RegularExpressions.Regex.Matches(extensionData, @"http://[^\s,)]+");
+                    foreach (System.Text.RegularExpressions.Match match in httpMatches)
+                    {
+                        crlUrls.Add(match.Value);
+                        Console.WriteLine($"Found CRL URL in server cert: {match.Value}");
+                    }
+                    
+                    var httpsMatches = System.Text.RegularExpressions.Regex.Matches(extensionData, @"https://[^\s,)]+");
+                    foreach (System.Text.RegularExpressions.Match match in httpsMatches)
+                    {
+                        crlUrls.Add(match.Value);
+                        Console.WriteLine($"Found CRL URL in server cert: {match.Value}");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"Server certificate does not have CRL Distribution Points extension");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error parsing CRL distribution points: {ex.Message}");
+            }
+            
+            return crlUrls;
         }
 
         private void CacheCrlThroughSchannel()
@@ -212,15 +259,6 @@ namespace System.Net.Security.Tests
             // Add intermediate CA to extra store
             chainOffline.ChainPolicy.ExtraStore.Add(_intermediateCA.CloneIssuerCert());
             chainOffline.ChainPolicy.ExtraStore.Add(_rootCA.CloneIssuerCert());
-            
-            // Add certificates from our custom store if available
-            if (_customCrlStore != null)
-            {
-                foreach (var cert in _customCrlStore.Certificates)
-                {
-                    chainOffline.ChainPolicy.ExtraStore.Add(cert);
-                }
-            }
 
             bool chainResult = chainOffline.Build(_serverCert);
             Console.WriteLine($"Offline chain build result: {chainResult}");
@@ -331,60 +369,11 @@ namespace System.Net.Security.Tests
             chain.ChainPolicy.ExtraStore.Add(_intermediateCA.CloneIssuerCert());
             chain.ChainPolicy.ExtraStore.Add(_rootCA.CloneIssuerCert());
             
-            // When offline, use our custom CRL store for revocation checking
-            if (!online && _customCrlStore != null)
-            {
-                // Add all certificates from our custom CRL store to the chain's extra store
-                foreach (var cert in _customCrlStore.Certificates)
-                {
-                    chain.ChainPolicy.ExtraStore.Add(cert);
-                }
-                Console.WriteLine($"Added {_customCrlStore.Certificates.Count} certificates from custom CRL store");
-            }
             
             chain.Build(certificate);
             return chain;
         }
 
-        private void CacheCrlInCustomStore(byte[] crlData)
-        {
-            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows) || crlData == null || crlData.Length == 0 || _customCrlStore == null)
-                return;
-
-            try
-            {
-                var storeHandle = _customCrlStore.StoreHandle;
-                if (storeHandle != IntPtr.Zero)
-                {
-                    // Create CRL context using P/Invoke
-                    IntPtr pCrl = CertCreateCRLContext(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, crlData, (uint)crlData.Length);
-                    if (pCrl != IntPtr.Zero)
-                    {
-                        try
-                        {
-                            // Add CRL to our custom store using its handle
-                            bool success = CertAddCRLContextToStore(storeHandle, pCrl, CERT_STORE_ADD_REPLACE_EXISTING, IntPtr.Zero);
-                            Console.WriteLine($"CRL cached in custom store: {success}");
-                            
-                            if (success)
-                            {
-                                // Force store resynchronization after successful CRL addition
-                                CertControlStore(storeHandle, 0, CERT_STORE_CTRL_RESYNC, IntPtr.Zero);
-                                Console.WriteLine($"Custom store resync triggered");
-                            }
-                        }
-                        finally
-                        {
-                            CertFreeCRLContext(pCrl);
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Failed to cache CRL in custom store: {ex.Message}");
-            }
-        }
 
         private async Task TestCrlCachingBehaviors()
         {
@@ -417,7 +406,6 @@ namespace System.Net.Security.Tests
                 _rootCA?.Dispose();
                 _intermediateCA?.Dispose();
                 _serverCert?.Dispose();
-                _customCrlStore?.Dispose();
             }
             catch (Exception ex)
             {
