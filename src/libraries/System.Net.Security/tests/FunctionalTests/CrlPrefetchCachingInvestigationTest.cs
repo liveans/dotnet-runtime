@@ -41,8 +41,7 @@ namespace System.Net.Security.Tests
                 // Step 1: Pre-fetch CRL information while online
                 await PrefetchCrlInformationAsync();
 
-                // Step 2: Cache CRL information through Schannel APIs
-                CacheCrlThroughSchannel();
+                // Step 2: CRL information is already cached in PrefetchCrlInformationAsync()
 
                 // Step 3: Go offline (stop the HTTP responder)
                 _responder?.Stop();
@@ -73,8 +72,7 @@ namespace System.Net.Security.Tests
                     chainOnline.ChainStatus.All(s => s.Status == X509ChainStatusFlags.NoError ||
                         s.Status == X509ChainStatusFlags.UntrustedRoot); // Self-signed test certs
 
-                // Cache CRL information
-                CacheCrlThroughSchannel();
+                // CRL information is already cached in PrefetchCrlInformationAsync()
 
                 // Stop responder to simulate offline environment
                 _responder?.Stop();
@@ -210,25 +208,6 @@ namespace System.Net.Security.Tests
             return crlUrls;
         }
 
-        private void CacheCrlThroughSchannel()
-        {
-            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-                return;
-
-            try
-            {
-                // Use P/Invoke to interact with Windows CRL caching APIs (skip root CA CRL)
-                CacheCrlViaWinApi(_intermediateCA.CdpUri);
-                
-                // Force Schannel to cache the CRL information
-                FlushAndCacheSystemCrls();
-            }
-            catch (Exception ex)
-            {
-                // Log but don't fail the test - P/Invoke operations might not be available in all test environments
-                Console.WriteLine($"CRL caching through Schannel failed: {ex.Message}");
-            }
-        }
 
         private async Task PerformOfflineRevocationCheckAsync()
         {
@@ -283,29 +262,14 @@ namespace System.Net.Security.Tests
                     CertificateRevocationCheckMode = X509RevocationMode.Online
                 };
 
-                try
-                {
-                    Task serverTask = server.AuthenticateAsServerAsync(serverOptions);
-                    Task clientTask = client.AuthenticateAsClientAsync(clientOptions);
+                Task serverTask = server.AuthenticateAsServerAsync(serverOptions);
+                Task clientTask = client.AuthenticateAsClientAsync(clientOptions);
 
-                    // Try to authenticate with a shorter timeout for investigation
-                    var timeoutTask = Task.Delay(TimeSpan.FromSeconds(5));
-                    var completedTask = await Task.WhenAny(Task.WhenAll(serverTask, clientTask), timeoutTask);
-                    
-                    if (completedTask == timeoutTask)
-                    {
-                        Console.WriteLine("SSL authentication timed out (expected in offline test scenario)");
-                        return; // Exit gracefully instead of failing
-                    }
-                    
-                    // If we get here, the cached revocation information worked
-                    Console.WriteLine($"SSL authentication succeeded - Client authenticated: {client.IsAuthenticated}, Server authenticated: {server.IsAuthenticated}");
-                }
-                catch (Exception ex)
-                {
-                    // Expected in offline scenario without proper caching infrastructure
-                    Console.WriteLine($"Authentication failed (expected in test environment): {ex.Message}");
-                }
+                await Task.WhenAll(serverTask, clientTask);
+                
+                // If we get here, the cached revocation information worked
+                Assert.True(client.IsAuthenticated);
+                Assert.True(server.IsAuthenticated);
             }
         }
 
@@ -369,8 +333,7 @@ namespace System.Net.Security.Tests
             // Test 2: Build chain while online
             using var onlineChain = BuildChainWithRevocation(_serverCert, online: true);
             
-            // Test 3: Cache CRL data
-            CacheCrlThroughSchannel();
+            // Test 3: CRL data is already cached in PrefetchCrlInformationAsync()
             
             // Test 4: Simulate network interruption
             _responder.RespondKind = RespondKind.Empty;
@@ -472,30 +435,6 @@ namespace System.Net.Security.Tests
             }
         }
 
-        private void CacheCrlViaWinApi(string crlUrl)
-        {
-            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows) || string.IsNullOrEmpty(crlUrl))
-                return;
-
-            try
-            {
-                // Force system to cache CRL from the given URL using managed store handle
-                using var store = new X509Store(StoreName.CertificateAuthority, StoreLocation.LocalMachine);
-                store.Open(OpenFlags.ReadWrite);
-                
-                var storeHandle = store.StoreHandle;
-                if (storeHandle != IntPtr.Zero)
-                {
-                    // Force store resynchronization to potentially cache new CRL data
-                    CertControlStore(storeHandle, 0, CERT_STORE_CTRL_RESYNC, IntPtr.Zero);
-                    Console.WriteLine($"Store resync triggered for CRL URL: {crlUrl}");
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Failed to cache CRL via WinAPI for {crlUrl}: {ex.Message}");
-            }
-        }
 
         private void FlushAndCacheSystemCrls()
         {
