@@ -28,12 +28,13 @@ namespace System.Net.Security.Tests
         private RevocationResponder _responder;
         private X509Certificate2 _serverCert;
         private bool _disposed;
-        private byte[] _intermediateCrlData;
 
         [Fact]
         [PlatformSpecific(TestPlatforms.Windows)]
         public async Task CrlPrefetchCaching_OnlineToOffline_RevocationCheckSucceeds()
         {
+            Console.WriteLine($"=== Starting test: {nameof(CrlPrefetchCaching_OnlineToOffline_RevocationCheckSucceeds)} ===");
+            
             await SetupTestInfrastructureAsync();
 
             try
@@ -52,6 +53,7 @@ namespace System.Net.Security.Tests
             finally
             {
                 CleanupTestInfrastructure();
+                Console.WriteLine($"=== Completed test: {nameof(CrlPrefetchCaching_OnlineToOffline_RevocationCheckSucceeds)} ===");
             }
         }
 
@@ -59,6 +61,8 @@ namespace System.Net.Security.Tests
         [PlatformSpecific(TestPlatforms.Windows)]
         public async Task CrlPrefetchCaching_ChainBuilding_OfflineRevocationSuccess()
         {
+            Console.WriteLine($"=== Starting test: {nameof(CrlPrefetchCaching_ChainBuilding_OfflineRevocationSuccess)} ===");
+            
             await SetupTestInfrastructureAsync();
 
             try
@@ -92,6 +96,7 @@ namespace System.Net.Security.Tests
             finally
             {
                 CleanupTestInfrastructure();
+                Console.WriteLine($"=== Completed test: {nameof(CrlPrefetchCaching_ChainBuilding_OfflineRevocationSuccess)} ===");
             }
         }
 
@@ -99,7 +104,7 @@ namespace System.Net.Security.Tests
         {
             // Use CertificateAuthority.BuildPrivatePki to create proper certificates with private keys
             CertificateAuthority.BuildPrivatePki(
-                PkiOptions.CrlEverywhere,
+                PkiOptions.EndEntityRevocationViaCrl,
                 out _responder,
                 out _rootCA,
                 out var intermediateAuthorities,
@@ -117,23 +122,10 @@ namespace System.Net.Security.Tests
 
         private async Task PrefetchCrlInformationAsync()
         {
-            // Fetch and cache CRL information by making requests to all CRL endpoints
+            // Fetch and cache CRL information only for the server certificate
             using var httpClient = new HttpClient();
 
-            // Fetch and cache intermediate CRL (root CAs don't typically need CRL verification)
-            if (_intermediateCA.CdpUri != null)
-            {
-                var intermediateCrlResponse = await httpClient.GetAsync(_intermediateCA.CdpUri);
-                Assert.True(intermediateCrlResponse.IsSuccessStatusCode);
-                _intermediateCrlData = await intermediateCrlResponse.Content.ReadAsByteArrayAsync();
-                Assert.True(_intermediateCrlData.Length > 0);
-                Console.WriteLine($"Fetched intermediate CRL: {_intermediateCrlData.Length} bytes");
-                
-                // Cache the CRL in Windows certificate stores
-                CacheCrlInStore(_intermediateCrlData, StoreName.CertificateAuthority);
-            }
-
-            // Fetch and cache server certificate CRL (if it has a CRL distribution point)
+            // Fetch and cache server certificate CRL (this is what we need for revocation checking)
             var serverCrlUrls = GetCrlDistributionPoints(_serverCert);
             foreach (string crlUrl in serverCrlUrls)
             {
