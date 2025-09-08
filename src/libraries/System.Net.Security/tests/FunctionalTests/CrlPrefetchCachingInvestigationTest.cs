@@ -67,23 +67,26 @@ namespace System.Net.Security.Tests
 
             try
             {
-                // Build chain with online CRL access first
+                // Step 1: Pre-fetch CRL information while online
+                await PrefetchCrlInformationAsync();
+                
+                // Step 2: Build chain with online CRL access first
                 var chainOnline = BuildChainWithRevocation(_serverCert, online: true);
-                Console.WriteLine($"Online chain status: {string.Join(", ", chainOnline.ChainStatus.Select(s => s.Status))}");
+                LogChainStatus("Online", chainOnline);
                 
                 // For investigation purposes, we expect some revocation information to be available
                 bool onlineHasRevocationInfo = chainOnline.ChainStatus.Length == 0 || 
                     chainOnline.ChainStatus.All(s => s.Status == X509ChainStatusFlags.NoError ||
                         s.Status == X509ChainStatusFlags.UntrustedRoot); // Self-signed test certs
 
-                // CRL information is already cached in PrefetchCrlInformationAsync()
+                // Step 3: CRL information is now cached
 
                 // Stop responder to simulate offline environment
                 _responder?.Stop();
 
-                // Build chain offline - investigate what happens with cached CRL
+                // Step 4: Build chain offline - investigate what happens with cached CRL
                 var chainOffline = BuildChainWithRevocation(_serverCert, online: false);
-                Console.WriteLine($"Offline chain status: {string.Join(", ", chainOffline.ChainStatus.Select(s => s.Status))}");
+                LogChainStatus("Offline", chainOffline);
                 
                 // For investigation, we're testing if offline behavior differs from online
                 bool offlineSucceeded = HasAcceptableRevocationStatus(chainOffline);
@@ -284,6 +287,56 @@ namespace System.Net.Security.Tests
             }
             
             return false;
+        }
+
+        private void LogChainStatus(string context, X509Chain chain)
+        {
+            Console.WriteLine($"{context} chain build result: {(chain.ChainStatus.Length == 0 || chain.ChainStatus.All(s => s.Status == X509ChainStatusFlags.NoError))}");
+            
+            if (chain.ChainStatus.Length > 0)
+            {
+                Console.WriteLine($"{context} chain status issues:");
+                foreach (var status in chain.ChainStatus)
+                {
+                    Console.WriteLine($"  - {status.Status}: {status.StatusInformation}");
+                }
+            }
+            else
+            {
+                Console.WriteLine($"{context} chain has no status issues");
+            }
+            
+            // Log detailed information about each certificate in the chain
+            Console.WriteLine($"{context} certificate chain details:");
+            for (int i = 0; i < chain.ChainElements.Count; i++)
+            {
+                var element = chain.ChainElements[i];
+                var cert = element.Certificate;
+                Console.WriteLine($"  Certificate {i}: {cert.Subject}");
+                Console.WriteLine($"    Serial: {cert.SerialNumber}");
+                Console.WriteLine($"    Issuer: {cert.Issuer}");
+                
+                if (element.ChainElementStatus.Length > 0)
+                {
+                    Console.WriteLine($"    Issues:");
+                    foreach (var elementStatus in element.ChainElementStatus)
+                    {
+                        Console.WriteLine($"      - {elementStatus.Status}: {elementStatus.StatusInformation}");
+                        
+                        // Specifically log revocation-related issues
+                        if (elementStatus.Status == X509ChainStatusFlags.RevocationStatusUnknown ||
+                            elementStatus.Status == X509ChainStatusFlags.OfflineRevocation ||
+                            elementStatus.Status == X509ChainStatusFlags.Revoked)
+                        {
+                            Console.WriteLine($"      *** REVOCATION ISSUE for certificate: {cert.Subject} ***");
+                        }
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"    Status: OK");
+                }
+            }
         }
 
         private bool HasAcceptableRevocationStatus(X509Chain chain)
