@@ -40,7 +40,7 @@ namespace System.Net.Security.Tests
             try
             {
                 // Step 1: Pre-fetch CRL information while online
-                await PrefetchCrlInformationAsync();
+                await PrefetchCrlInformationViaCryptnetAsync();
 
                 // Step 2: CRL information is already cached in PrefetchCrlInformationAsync()
 
@@ -68,7 +68,7 @@ namespace System.Net.Security.Tests
             try
             {
                 // Step 1: Pre-fetch CRL information while online
-                await PrefetchCrlInformationAsync();
+                await PrefetchCrlInformationViaCryptnetAsync();
                 
                 // Step 2: Build chain with online CRL access first
                 var chainOnline = BuildChainWithRevocation(_serverCert, online: true);
