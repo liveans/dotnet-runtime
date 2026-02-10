@@ -22,6 +22,13 @@
 #include <assert.h>
 #include <string.h>
 #include <stdlib.h>
+#include <pthread.h>
+
+// Mutex to serialize GSS-API context operations.
+// Some versions of krb5 (notably 1.22+) have thread-safety issues
+// in gss_init_sec_context and gss_accept_sec_context that can cause
+// crashes under concurrent access.
+static pthread_mutex_t s_gssMutex = PTHREAD_MUTEX_INITIALIZER;
 
 #if defined(GSS_SHIM)
 #include <dlfcn.h>
@@ -170,8 +177,10 @@ static uint32_t AcquireCredSpNego(uint32_t* minorStatus,
 #else
     gss_OID_set_desc gss_mech_spnego_OID_set_desc = {.count = 1, .elements = &gss_mech_spnego_OID_desc};
 #endif
+    pthread_mutex_lock(&s_gssMutex);
     uint32_t majorStatus = gss_acquire_cred(
         minorStatus, desiredName, 0, &gss_mech_spnego_OID_set_desc, credUsage, outputCredHandle, NULL, NULL);
+    pthread_mutex_unlock(&s_gssMutex);
 
     return majorStatus;
 }
@@ -187,7 +196,11 @@ uint32_t NetSecurityNative_DeleteSecContext(uint32_t* minorStatus, GssCtxId** co
     assert(minorStatus != NULL);
     assert(contextHandle != NULL);
 
-    return gss_delete_sec_context(minorStatus, contextHandle, GSS_C_NO_BUFFER);
+    pthread_mutex_lock(&s_gssMutex);
+    uint32_t result = gss_delete_sec_context(minorStatus, contextHandle, GSS_C_NO_BUFFER);
+    pthread_mutex_unlock(&s_gssMutex);
+
+    return result;
 }
 
 static uint32_t NetSecurityNative_DisplayStatus(uint32_t* minorStatus,
@@ -371,7 +384,9 @@ uint32_t NetSecurityNative_InitSecContextEx(uint32_t* minorStatus,
         gssCbt.application_data.value = cbt;
     }
 
-    uint32_t majorStatus = gss_init_sec_context(minorStatus,
+    uint32_t majorStatus;
+    pthread_mutex_lock(&s_gssMutex);
+    majorStatus = gss_init_sec_context(minorStatus,
                                                 claimantCredHandle,
                                                 contextHandle,
                                                 targetName,
@@ -384,6 +399,7 @@ uint32_t NetSecurityNative_InitSecContextEx(uint32_t* minorStatus,
                                                 &gssBuffer,
                                                 retFlags,
                                                 NULL);
+    pthread_mutex_unlock(&s_gssMutex);
 
     *isNtlmUsed = (packageType == PAL_GSS_NTLM || majorStatus != GSS_S_COMPLETE || gss_oid_equal(outmech, krbMech) == 0) ? 1 : 0;
 
@@ -412,7 +428,9 @@ uint32_t NetSecurityNative_AcceptSecContext(uint32_t* minorStatus,
     GssBuffer gssBuffer = {.length = 0, .value = NULL};
 
     gss_OID mechType = GSS_C_NO_OID;
-    uint32_t majorStatus = gss_accept_sec_context(minorStatus,
+    uint32_t majorStatus;
+    pthread_mutex_lock(&s_gssMutex);
+    majorStatus = gss_accept_sec_context(minorStatus,
                                                   contextHandle,
                                                   acceptorCredHandle,
                                                   &inputToken,
@@ -423,6 +441,7 @@ uint32_t NetSecurityNative_AcceptSecContext(uint32_t* minorStatus,
                                                   retFlags,
                                                   NULL,
                                                   NULL);
+    pthread_mutex_unlock(&s_gssMutex);
 
 #if HAVE_GSS_SPNEGO_MECHANISM
     gss_OID ntlmMech = GSS_NTLM_MECHANISM;
@@ -486,7 +505,11 @@ uint32_t NetSecurityNative_ReleaseCred(uint32_t* minorStatus, GssCredId** credHa
     assert(minorStatus != NULL);
     assert(credHandle != NULL);
 
-    return gss_release_cred(minorStatus, credHandle);
+    pthread_mutex_lock(&s_gssMutex);
+    uint32_t result = gss_release_cred(minorStatus, credHandle);
+    pthread_mutex_unlock(&s_gssMutex);
+
+    return result;
 }
 
 void NetSecurityNative_ReleaseGssBuffer(void* buffer, uint64_t length)
@@ -643,8 +666,10 @@ static uint32_t AcquireCredWithPassword(uint32_t* minorStatus,
 #endif
 
     GssBuffer passwordBuffer = {.length = passwdLen, .value = password};
+    pthread_mutex_lock(&s_gssMutex);
     uint32_t majorStatus = gss_acquire_cred_with_password(
         minorStatus, desiredName, &passwordBuffer, 0, desiredMechSet, credUsage, outputCredHandle, NULL, NULL);
+    pthread_mutex_unlock(&s_gssMutex);
 
     return majorStatus;
 }
@@ -652,7 +677,8 @@ static uint32_t AcquireCredWithPassword(uint32_t* minorStatus,
 uint32_t NetSecurityNative_AcquireAcceptorCred(uint32_t* minorStatus,
                                                GssCredId** outputCredHandle)
 {
-    return gss_acquire_cred(minorStatus,
+    pthread_mutex_lock(&s_gssMutex);
+    uint32_t result = gss_acquire_cred(minorStatus,
                             GSS_C_NO_NAME,
                             GSS_C_INDEFINITE,
                             GSS_C_NO_OID_SET,
@@ -660,6 +686,9 @@ uint32_t NetSecurityNative_AcquireAcceptorCred(uint32_t* minorStatus,
                             outputCredHandle,
                             NULL,
                             NULL);
+    pthread_mutex_unlock(&s_gssMutex);
+
+    return result;
 }
 
 uint32_t NetSecurityNative_InitiateCredWithPassword(uint32_t* minorStatus,

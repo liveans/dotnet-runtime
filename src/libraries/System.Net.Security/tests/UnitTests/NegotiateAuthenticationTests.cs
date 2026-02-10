@@ -10,6 +10,7 @@ using System.Net.Security;
 using System.Net.Test.Common;
 using System.Security.Principal;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
 
@@ -395,6 +396,40 @@ namespace System.Net.Security.Tests
                 }
             }
             while (!ntAuth.IsAuthenticated);
+        }
+
+        [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsNotWindowsNanoNorServerCore))]
+        [SkipOnPlatform(TestPlatforms.Windows | TestPlatforms.Browser, "Targets GSS-API thread safety on Unix")]
+        public void ConcurrentNegotiateAuthentication_DoesNotCrash()
+        {
+            const int ThreadCount = 8;
+            const int IterationsPerThread = 25;
+
+            using var barrier = new Barrier(ThreadCount);
+            var tasks = new Task[ThreadCount];
+
+            for (int t = 0; t < ThreadCount; t++)
+            {
+                int threadId = t;
+                tasks[t] = Task.Run(() =>
+                {
+                    barrier.SignalAndWait();
+
+                    for (int i = 0; i < IterationsPerThread; i++)
+                    {
+                        using var auth = new NegotiateAuthentication(
+                            new NegotiateAuthenticationClientOptions
+                            {
+                                Credential = new NetworkCredential($"user{threadId}", "password", "DOMAIN"),
+                                TargetName = $"HTTP/server{threadId % 4}.test.local",
+                            });
+
+                        auth.GetOutgoingBlob(ReadOnlySpan<byte>.Empty, out _);
+                    }
+                });
+            }
+
+            Task.WaitAll(tasks);
         }
     }
 }
