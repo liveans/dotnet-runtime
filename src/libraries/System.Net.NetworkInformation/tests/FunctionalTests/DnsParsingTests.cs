@@ -20,6 +20,7 @@ namespace System.Net.NetworkInformation.Tests
         [InlineData("NetworkFiles/resolv_subdomain_comment.conf", "correct.domain.net")]
         [InlineData("NetworkFiles/resolv_search_multiple_domains.conf", "foo3.com")]
         [InlineData("NetworkFiles/resolv_midline_keyword.conf", "valid.suffix.net")]
+        [InlineData("NetworkFiles/resolv_comment_keyword_after_directive.conf", "valid.suffix.net")]
         public void DnsSuffixParsing(string file, string expectedSuffix)
         {
             string fileName = GetTestFilePath();

@@ -31,6 +31,14 @@ namespace System.Net.NetworkInformation
                     break;
                 }
 
+                // Per resolv.conf(5), keywords must start the line.
+                // Verify the match is at a line boundary before using RowConfigReader.
+                if (nextIndex > 0 && remaining[nextIndex - 1] != '\n')
+                {
+                    remaining = remaining.Slice(nextIndex + 1);
+                    continue;
+                }
+
                 string nextKeyword = remaining[nextIndex] == 'd' ? "domain" : "search";
 
                 // Use RowConfigReader to validate and extract the value.
